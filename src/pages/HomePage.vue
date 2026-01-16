@@ -1,0 +1,219 @@
+<script setup lang="ts">
+import { ref } from 'vue'
+import { playSfx } from '../composables/useAudio'
+import { ASSET_SOURCES } from '../composables/useAssets'
+
+const emit = defineEmits<{
+  (e: 'start-game'): void
+}>()
+
+const showSettings = ref(false)
+const showAssetGuide = ref(false)
+const showHowToPlay = ref(false)
+
+const handleStart = () => {
+  playSfx('click')
+  emit('start-game')
+}
+
+const closeAllPopups = () => {
+  showSettings.value = false
+  showAssetGuide.value = false
+  showHowToPlay.value = false
+}
+
+const openSettings = () => {
+  closeAllPopups()
+  showSettings.value = true
+  playSfx('click')
+}
+
+const openAssetGuide = () => {
+  closeAllPopups()
+  showAssetGuide.value = true
+  playSfx('click')
+}
+
+const openHowToPlay = () => {
+  closeAllPopups()
+  showHowToPlay.value = true
+  playSfx('click')
+}
+</script>
+
+<template>
+  <div class="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-neutral-950">
+    <!-- Background atmosphere -->
+    <div class="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_rgba(139,0,0,0.15),_transparent_50%)]"></div>
+    <div class="absolute inset-0 bg-[radial-gradient(ellipse_at_bottom,_rgba(0,0,0,0.8),_transparent_70%)]"></div>
+    
+    <!-- Animated fog effect -->
+    <div class="pointer-events-none absolute inset-0 opacity-30">
+      <div class="animate-fog absolute h-full w-[200%] bg-gradient-to-r from-transparent via-neutral-800/20 to-transparent"></div>
+    </div>
+
+    <!-- Main content -->
+    <div class="relative z-10 flex flex-col items-center gap-8 px-4">
+      <!-- Logo/Title -->
+      <div class="text-center">
+        <div class="mb-4 text-6xl">🏚️</div>
+        <h1 class="font-serif text-5xl font-bold tracking-tight text-red-600 drop-shadow-[0_0_20px_rgba(220,38,38,0.5)] md:text-6xl">
+          Silent Castle
+        </h1>
+        <p class="mt-3 text-lg text-neutral-400">Survive the night... or die trying</p>
+      </div>
+
+      <!-- Menu buttons -->
+      <div class="flex flex-col gap-3">
+        <button
+          class="group relative w-64 overflow-hidden rounded-lg border-2 border-red-900/50 bg-red-950/80 px-8 py-4 font-bold uppercase tracking-wider text-red-100 shadow-lg shadow-red-950/50 transition-all hover:border-red-700 hover:bg-red-900/80 hover:shadow-red-900/50"
+          @click="handleStart"
+        >
+          <span class="relative z-10">▶ Bắt đầu</span>
+          <div class="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-red-500/20 to-transparent transition-transform group-hover:translate-x-full"></div>
+        </button>
+
+        <button
+          class="w-64 rounded-lg border border-neutral-700 bg-neutral-900/80 px-8 py-3 font-medium text-neutral-300 transition-all hover:border-neutral-500 hover:bg-neutral-800"
+          @click="openHowToPlay"
+        >
+          📖 Cách chơi
+        </button>
+
+        <button
+          class="w-64 rounded-lg border border-neutral-700 bg-neutral-900/80 px-8 py-3 font-medium text-neutral-300 transition-all hover:border-neutral-500 hover:bg-neutral-800"
+          @click="openSettings"
+        >
+          ⚙️ Cài đặt
+        </button>
+
+        <button
+          class="w-64 rounded-lg border border-neutral-700 bg-neutral-900/80 px-8 py-3 font-medium text-neutral-300 transition-all hover:border-neutral-500 hover:bg-neutral-800"
+          @click="openAssetGuide"
+        >
+          📦 Tài nguyên
+        </button>
+      </div>
+
+      <!-- Version -->
+      <p class="text-xs text-neutral-600">v1.0.0 • PWA Offline Ready</p>
+    </div>
+
+    <!-- POPUP: How to Play -->
+    <Transition name="popup">
+      <div v-if="showHowToPlay" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" @click.self="closeAllPopups">
+        <div class="relative max-h-[80vh] w-full max-w-md overflow-y-auto rounded-2xl border border-neutral-700 bg-neutral-900 p-6 shadow-2xl">
+          <button class="absolute right-4 top-4 text-2xl text-neutral-500 hover:text-white" @click="closeAllPopups">✕</button>
+          
+          <h2 class="mb-4 text-center font-serif text-2xl font-bold text-red-500">Cách chơi</h2>
+          
+          <div class="space-y-4 text-sm text-neutral-300">
+            <div class="rounded-lg bg-neutral-800/50 p-3">
+              <p class="font-bold text-amber-400">🌙 Mục tiêu</p>
+              <p class="mt-1">Sống sót qua các đêm. Quái vật sẽ tấn công phòng có cửa yếu nhất.</p>
+            </div>
+            
+            <div class="rounded-lg bg-neutral-800/50 p-3">
+              <p class="font-bold text-amber-400">💰 Tài nguyên</p>
+              <p class="mt-1">Ngủ để nhận vàng mỗi đêm. Dùng vàng để nâng cấp và sửa chữa.</p>
+            </div>
+            
+            <div class="rounded-lg bg-neutral-800/50 p-3">
+              <p class="font-bold text-amber-400">🚪 Phòng thủ</p>
+              <p class="mt-1">Nâng cấp cửa để tăng máu và giảm sát thương. Xây trụ để tấn công quái.</p>
+            </div>
+            
+            <div class="rounded-lg bg-neutral-800/50 p-3">
+              <p class="font-bold text-amber-400">👹 Quái vật</p>
+              <p class="mt-1">Mỗi 5 đêm quái sẽ đổi mục tiêu. Tiêu diệt quái để chiến thắng!</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- POPUP: Settings -->
+    <Transition name="popup">
+      <div v-if="showSettings" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" @click.self="closeAllPopups">
+        <div class="relative w-full max-w-md rounded-2xl border border-neutral-700 bg-neutral-900 p-6 shadow-2xl">
+          <button class="absolute right-4 top-4 text-2xl text-neutral-500 hover:text-white" @click="closeAllPopups">✕</button>
+          
+          <h2 class="mb-6 text-center font-serif text-2xl font-bold text-red-500">Cài đặt</h2>
+          
+          <div class="space-y-6">
+            <div>
+              <div class="mb-2 flex items-center justify-between">
+                <span class="text-neutral-300">🔊 Nhạc nền</span>
+                <span class="text-xs text-neutral-500">Coming soon</span>
+              </div>
+              <input type="range" min="0" max="100" value="50" class="h-2 w-full cursor-pointer appearance-none rounded-full bg-neutral-700 accent-red-500" disabled />
+            </div>
+            
+            <div>
+              <div class="mb-2 flex items-center justify-between">
+                <span class="text-neutral-300">🔔 Hiệu ứng</span>
+                <span class="text-xs text-neutral-500">Coming soon</span>
+              </div>
+              <input type="range" min="0" max="100" value="70" class="h-2 w-full cursor-pointer appearance-none rounded-full bg-neutral-700 accent-red-500" disabled />
+            </div>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- POPUP: Asset Guide -->
+    <Transition name="popup">
+      <div v-if="showAssetGuide" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" @click.self="closeAllPopups">
+        <div class="relative max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-neutral-700 bg-neutral-900 p-6 shadow-2xl">
+          <button class="absolute right-4 top-4 text-2xl text-neutral-500 hover:text-white" @click="closeAllPopups">✕</button>
+          
+          <h2 class="mb-4 text-center font-serif text-2xl font-bold text-red-500">Tài nguyên Game</h2>
+          
+          <div class="mb-4 rounded-lg bg-neutral-800/50 p-3 text-sm text-neutral-300">
+            <p class="font-bold text-amber-400">📁 Thư mục asset:</p>
+            <ul class="mt-2 space-y-1 font-mono text-xs">
+              <li>• src/assets/character/</li>
+              <li>• src/assets/monster/</li>
+              <li>• src/assets/structor/</li>
+              <li>• src/assets/items/</li>
+            </ul>
+          </div>
+          
+          <p class="mb-3 text-sm font-bold text-neutral-400">Nguồn sprite miễn phí:</p>
+          <div class="space-y-2">
+            <a
+              v-for="source in ASSET_SOURCES"
+              :key="source.url"
+              :href="source.url"
+              target="_blank"
+              class="block rounded-lg border border-neutral-700 bg-neutral-800/50 p-3 transition hover:border-red-700 hover:bg-neutral-800"
+            >
+              <span class="font-medium text-red-400">{{ source.name }}</span>
+              <p class="mt-1 text-xs text-neutral-500">{{ source.description }}</p>
+            </a>
+          </div>
+        </div>
+      </div>
+    </Transition>
+  </div>
+</template>
+
+<style scoped>
+.popup-enter-active,
+.popup-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.popup-enter-from,
+.popup-leave-to {
+  opacity: 0;
+  transform: scale(0.95);
+}
+
+@keyframes fog {
+  0% { transform: translateX(-50%); }
+  100% { transform: translateX(0%); }
+}
+.animate-fog {
+  animation: fog 20s linear infinite;
+}
+</style>
