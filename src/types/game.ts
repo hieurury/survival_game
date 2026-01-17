@@ -180,6 +180,7 @@ export interface Projectile {
   ownerId: number
   color: string
   size: number
+  isHoming?: boolean // If true, tracks monster's current position
 }
 
 export interface GameSettings {
@@ -234,6 +235,7 @@ export const GAME_CONSTANTS = {
   // Viewport (what player sees) - optimized for mobile
   VIEWPORT_WIDTH: 960,
   VIEWPORT_HEIGHT: 540,
+  CAMERA_PADDING: 200, // Extra padding to view map edges/corners
   
   // Game settings
   AI_COUNT: 4,
@@ -260,12 +262,12 @@ export const GAME_CONSTANTS = {
   MONSTER_TARGET_TIMEOUT: 30, // Max 30 seconds attacking same target
   
   // Rooms & Doors - NEW SCALING
-  BASE_DOOR_HP: 250, // Level 1 = 150 HP
+  BASE_DOOR_HP: 350, // Level 1 = 150 HP
   DOOR_HP_SCALE: 1.5, // Each level = previous * 1.5
   DOOR_UPGRADE_COST_SCALE: 2, // Cost increases 20% each level
-  DOOR_REPAIR_DURATION: 7, // Seconds to repair
+  DOOR_REPAIR_DURATION: 5, // Seconds to repair
   DOOR_REPAIR_COOLDOWN: 30, // Cooldown between repairs
-  DOOR_REPAIR_PERCENT: 0.2, // Heals 20% of max HP
+  DOOR_REPAIR_PERCENT: 0.35, // Heals 35% of max HP
   ROOMS_COUNT: 7, // 7 rooms now
   
   // Bed & Sleeping - DOUBLING GOLD/COST SCALING (NO WAKE UP)
@@ -293,7 +295,7 @@ export const GAME_CONSTANTS = {
     turret: { hp: 50, damage: 10, range: 160, cooldown: 1.0, upgradeCost: 10 },
     atm: { hp: 50, damage: 0, range: 0, cooldown: 0, upgradeCost: 100, goldRate: 4 }, // 4 gold/s base, costs souls
     soul_collector: { hp: 50, damage: 0, range: 0, cooldown: 0, upgradeCost: 440, soulRate: 1 },
-    vanguard: { hp: 80, damage: 0, range: 0, cooldown: 0, upgradeCost: 150 }, // Spawner building
+    vanguard: { hp: 200, damage: 0, range: 0, cooldown: 0, upgradeCost: 150 }, // Spawner building
   },
   
   // ATM gold scaling: 4, 8, 16, 32, 64... per level (starts at 4)
@@ -305,17 +307,17 @@ export const GAME_CONSTANTS = {
   
   // Vanguard Unit constants
   VANGUARD: {
-    GOLD_COST: 150,
+    GOLD_COST: 250,
     SOUL_COST: 80, // Required from level 5+
-    BASE_HP: 20,
-    BASE_DAMAGE: 10,
+    BASE_HP: 100,
+    BASE_DAMAGE: 20,
     HP_SCALE: 1.3, // +30% HP per level
     DAMAGE_SCALE: 1.2, // +20% damage per level
     RESPAWN_TIME: 30, // 30 seconds respawn
     ATTACK_RANGE: 45, // Melee attack range
     ATTACK_COOLDOWN: 1.0, // 1 attack per second
     DETECTION_RANGE: 300, // Range to detect monsters
-    UPGRADE_COST: 150, // Base upgrade cost (doubles each level)
+    UPGRADE_COST: 250, // Base upgrade cost (doubles each level)
   },
   
   // Building upgrade scaling

@@ -3,6 +3,7 @@ import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { initAudio, playSfx, startBgm, stopBgm } from '../composables/useAudio'
 import { findPath, distance, moveTowards, gridToWorld } from '../composables/usePathfinding'
 import BotAI from '../composables/useBotAI'
+import { t, getBuildingTypeName, getRoomTypeName } from '../composables/useLocale'
 import type { 
   Room, Player, Monster, GamePhase, GridCell, 
   DefenseBuilding, Particle, Projectile, Vector2,
@@ -445,7 +446,8 @@ const isDoorPassable = (room: Room, entityId: number, isMonster: boolean = false
 }
 
 // Create walkable grid for pathfinding (considers door states and room access)
-const createWalkableGrid = (entityId: number, isMonster: boolean = false): GridCell[][] => {
+// isVanguard: vanguard units can pass through all doors and buildings
+const createWalkableGrid = (entityId: number, isMonster: boolean = false, isVanguard: boolean = false): GridCell[][] => {
   const walkableGrid: GridCell[][] = []
   
   for (let y = 0; y < grid.length; y++) {
@@ -458,9 +460,13 @@ const createWalkableGrid = (entityId: number, isMonster: boolean = false): GridC
       if (cell.type === 'door' && cell.roomId !== undefined) {
         const room = rooms[cell.roomId]
         if (room) {
+          // Vanguard can pass through ANY door freely
+          if (isVanguard) {
+            newCell.walkable = true
+          }
           // Monster can walk TO door cells to attack them, but can't pass through intact doors
           // When door is broken, monster can pass through
-          if (isMonster) {
+          else if (isMonster) {
             newCell.walkable = true // Monster can always path TO the door cell
           } else {
             newCell.walkable = isDoorPassable(room, entityId, false)
@@ -471,8 +477,12 @@ const createWalkableGrid = (entityId: number, isMonster: boolean = false): GridC
       else if (cell.type === 'room' && cell.roomId !== undefined) {
         const room = rooms[cell.roomId]
         if (room) {
+          // Vanguard can enter ANY room freely
+          if (isVanguard) {
+            newCell.walkable = true
+          }
           // Monster can only enter if door is broken
-          if (isMonster) {
+          else if (isMonster) {
             newCell.walkable = room.doorHp <= 0
           } else {
             // Can only walk in room if we own it or it's accessible
@@ -543,89 +553,240 @@ const getBuildingRange = (baseRange: number, level: number): number => {
   return Math.floor(baseRange * Math.pow(GAME_CONSTANTS.BUILDING_RANGE_SCALE, level - 1))
 }
 
-// Camera drag handlers
+// Camera drag handlers - LEFT CLICK to drag camera
+const isMouseDown = ref(false)
+const hasDragged = ref(false) // Track if mouse actually moved (vs just click)
+const DRAG_THRESHOLD = 5 // Pixels of movement before considered a drag
+
 const handleMouseDown = (e: MouseEvent) => {
-  if (e.button === 2 || e.button === 1) { // Right or middle click to drag
-    isDragging.value = true
-    cameraManualMode.value = true // User manually controls camera
+  if (e.button === 0) { // Left click
+    isMouseDown.value = true
+    hasDragged.value = false
     dragStart.x = e.clientX
     dragStart.y = e.clientY
     cameraStart.x = camera.x
     cameraStart.y = camera.y
-    e.preventDefault()
   }
 }
 
 const handleMouseMove = (e: MouseEvent) => {
-  if (isDragging.value) {
+  if (isMouseDown.value) {
     const dx = dragStart.x - e.clientX
     const dy = dragStart.y - e.clientY
-    camera.x = Math.max(0, Math.min(GAME_CONSTANTS.WORLD_WIDTH - viewportWidth.value, cameraStart.x + dx))
-    camera.y = Math.max(0, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight.value, cameraStart.y + dy))
+    const dragDistance = Math.sqrt(dx * dx + dy * dy)
+    
+    // Only start dragging if moved beyond threshold
+    if (dragDistance > DRAG_THRESHOLD) {
+      hasDragged.value = true
+      isDragging.value = true
+      cameraManualMode.value = true
+      const pad = GAME_CONSTANTS.CAMERA_PADDING
+      camera.x = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_WIDTH - viewportWidth.value + pad, cameraStart.x + dx))
+      camera.y = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight.value + pad, cameraStart.y + dy))
+    }
   }
 }
 
 const handleMouseUp = () => {
+  isMouseDown.value = false
   isDragging.value = false
 }
 
-// Touch event handlers for mobile continuous movement
-let touchMoveInterval: number | null = null
-const activeDirection = ref<'up' | 'down' | 'left' | 'right' | null>(null)
+// Continuous movement input state (for smooth movement)
+const moveInput = reactive({ up: false, down: false, left: false, right: false })
 
-const startMove = (dir: 'up' | 'down' | 'left' | 'right') => {
-  if (touchMoveInterval) {
-    clearInterval(touchMoveInterval)
+// Keyboard handler for WASD/Arrow keys
+const handleKeyDown = (e: KeyboardEvent) => {
+  if (gamePhase.value !== 'playing') return
+  if (!humanPlayer.value?.alive || humanPlayer.value.isSleeping) return
+  
+  switch (e.key.toLowerCase()) {
+    case 'w': case 'arrowup': moveInput.up = true; e.preventDefault(); break
+    case 's': case 'arrowdown': moveInput.down = true; e.preventDefault(); break
+    case 'a': case 'arrowleft': moveInput.left = true; e.preventDefault(); break
+    case 'd': case 'arrowright': moveInput.right = true; e.preventDefault(); break
   }
-  activeDirection.value = dir
-  moveDirection(dir) // Move immediately
-  touchMoveInterval = window.setInterval(() => {
-    if (activeDirection.value) {
-      moveDirection(activeDirection.value)
-    }
-  }, 100)
+}
+
+const handleKeyUp = (e: KeyboardEvent) => {
+  switch (e.key.toLowerCase()) {
+    case 'w': case 'arrowup': moveInput.up = false; break
+    case 's': case 'arrowdown': moveInput.down = false; break
+    case 'a': case 'arrowleft': moveInput.left = false; break
+    case 'd': case 'arrowright': moveInput.right = false; break
+  }
+}
+
+// Touch/button handlers for mobile - set input state
+const startMove = (dir: 'up' | 'down' | 'left' | 'right') => {
+  moveInput[dir] = true
 }
 
 const stopMove = () => {
-  activeDirection.value = null
-  if (touchMoveInterval) {
-    clearInterval(touchMoveInterval)
-    touchMoveInterval = null
-  }
+  moveInput.up = false
+  moveInput.down = false
+  moveInput.left = false
+  moveInput.right = false
 }
 
-// Touch handlers for canvas panning
+const stopMoveDir = (dir: 'up' | 'down' | 'left' | 'right') => {
+  moveInput[dir] = false
+}
+
+// Touch handlers for canvas panning - SINGLE FINGER drag
+const isTouchDown = ref(false)
+const hasTouchDragged = ref(false)
+const touchStart = reactive({ x: 0, y: 0 })
+
 const handleTouchStart = (e: TouchEvent) => {
-  if (e.touches.length === 2 && e.touches[0] && e.touches[1]) {
-    isDragging.value = true
-    cameraManualMode.value = true
-    const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2
-    const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2
-    dragStart.x = midX
-    dragStart.y = midY
+  if (e.touches.length === 1 && e.touches[0]) {
+    isTouchDown.value = true
+    hasTouchDragged.value = false
+    touchStart.x = e.touches[0].clientX
+    touchStart.y = e.touches[0].clientY
+    dragStart.x = e.touches[0].clientX
+    dragStart.y = e.touches[0].clientY
     cameraStart.x = camera.x
     cameraStart.y = camera.y
   }
 }
 
 const handleTouchMove = (e: TouchEvent) => {
-  if (isDragging.value && e.touches.length === 2 && e.touches[0] && e.touches[1]) {
-    const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2
-    const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2
-    const dx = dragStart.x - midX
-    const dy = dragStart.y - midY
-    camera.x = Math.max(0, Math.min(GAME_CONSTANTS.WORLD_WIDTH - viewportWidth.value, cameraStart.x + dx))
-    camera.y = Math.max(0, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight.value, cameraStart.y + dy))
+  if (isTouchDown.value && e.touches.length === 1 && e.touches[0]) {
+    const dx = touchStart.x - e.touches[0].clientX
+    const dy = touchStart.y - e.touches[0].clientY
+    const dragDistance = Math.sqrt(dx * dx + dy * dy)
+    
+    if (dragDistance > DRAG_THRESHOLD) {
+      hasTouchDragged.value = true
+      isDragging.value = true
+      cameraManualMode.value = true
+      const pad = GAME_CONSTANTS.CAMERA_PADDING
+      camera.x = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_WIDTH - viewportWidth.value + pad, cameraStart.x + dx))
+      camera.y = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight.value + pad, cameraStart.y + dy))
+    }
   }
 }
 
 const handleTouchEnd = () => {
+  // If didn't drag, simulate a click at touch position
+  if (isTouchDown.value && !hasTouchDragged.value && canvasRef.value) {
+    // Create synthetic click event for UI interaction
+    const rect = canvasRef.value.getBoundingClientRect()
+    const scaleX = viewportWidth.value / rect.width
+    const scaleY = viewportHeight.value / rect.height
+    const x = (touchStart.x - rect.left) * scaleX
+    const y = (touchStart.y - rect.top) * scaleY
+    handleTouchTap(x, y)
+  }
+  isTouchDown.value = false
   isDragging.value = false
 }
 
-// Handle canvas click
+// Handle touch tap (similar to canvas click but for touch)
+const handleTouchTap = (x: number, y: number) => {
+  if (!canvasRef.value) return
+  
+  const worldX = x + camera.x
+  const worldY = y + camera.y
+  
+  const cellX = Math.floor(worldX / GAME_CONSTANTS.CELL_SIZE)
+  const cellY = Math.floor(worldY / GAME_CONSTANTS.CELL_SIZE)
+  
+  if (!grid[cellY]?.[cellX]) return
+  const cell = grid[cellY][cellX]
+  
+  if (gamePhase.value === 'playing' && humanPlayer.value?.alive) {
+    const myRoom = humanPlayer.value.roomId !== null ? rooms.find(r => r.id === humanPlayer.value!.roomId) : null
+    
+    // Door interaction
+    if (cell.type === 'door' && cell.roomId !== undefined) {
+      const clickedRoom = rooms.find(r => r.id === cell.roomId)
+      if (clickedRoom && clickedRoom.ownerId === humanPlayer.value.id) {
+        const distToDoor = distance(humanPlayer.value.position, clickedRoom.doorPosition)
+        // Allow from anywhere when sleeping
+        if (humanPlayer.value.isSleeping || distToDoor < GAME_CONSTANTS.CELL_SIZE * 4) {
+          upgradeTarget.value = { type: 'door', room: clickedRoom }
+          showUpgradeModal.value = true
+          playSfx('click')
+          return
+        }
+      }
+    }
+    
+    // Bed/building/build spot interactions (same as handleCanvasClick)
+    if (myRoom) {
+      const distToBedClick = distance({ x: worldX, y: worldY }, myRoom.bedPosition)
+      if (distToBedClick < 40) {
+        const playerDistToBed = distance(humanPlayer.value.position, myRoom.bedPosition)
+        // Allow when sleeping OR close enough
+        if (humanPlayer.value.isSleeping || playerDistToBed < GAME_CONSTANTS.BED_INTERACT_RANGE) {
+          if (humanPlayer.value.isSleeping) {
+            upgradeTarget.value = { type: 'bed', room: myRoom }
+            showUpgradeModal.value = true
+            playSfx('click')
+            return
+          } else {
+            humanPlayer.value.isSleeping = true
+            humanPlayer.value.state = 'sleeping'
+            humanPlayer.value.position.x = myRoom.bedPosition.x
+            humanPlayer.value.position.y = myRoom.bedPosition.y
+            humanPlayer.value.targetPosition = null
+            humanPlayer.value.path = []
+            playSfx('click')
+            addMessage('Started sleeping - earning gold!')
+            return
+          }
+        }
+        return
+      }
+      
+      // Building upgrade
+      for (const building of buildings) {
+        if (building.ownerId !== humanPlayer.value.id || building.hp <= 0) continue
+        const bPos = gridToWorld({ x: building.gridX, y: building.gridY }, GAME_CONSTANTS.CELL_SIZE)
+        const distToBuilding = distance({ x: worldX, y: worldY }, bPos)
+        if (distToBuilding < 35) {
+          const playerDistToBuilding = distance(humanPlayer.value.position, bPos)
+          if (playerDistToBuilding < GAME_CONSTANTS.CELL_SIZE * 3 || humanPlayer.value.isSleeping) {
+            upgradeTarget.value = { type: 'building', building }
+            showUpgradeModal.value = true
+            playSfx('click')
+            return
+          }
+        }
+      }
+      
+      // Build spot
+      for (const spot of myRoom.buildSpots) {
+        if (!spot) continue
+        const distToSpot = distance({ x: worldX, y: worldY }, spot)
+        if (distToSpot < 30) {
+          const existingBuilding = buildings.find(b => 
+            b.hp > 0 &&
+            Math.abs(gridToWorld({ x: b.gridX, y: b.gridY }, GAME_CONSTANTS.CELL_SIZE).x - spot.x) < 30 &&
+            Math.abs(gridToWorld({ x: b.gridX, y: b.gridY }, GAME_CONSTANTS.CELL_SIZE).y - spot.y) < 30
+          )
+          if (!existingBuilding) {
+            selectedBuildSpot.value = { 
+              x: Math.floor(spot.x / GAME_CONSTANTS.CELL_SIZE), 
+              y: Math.floor(spot.y / GAME_CONSTANTS.CELL_SIZE),
+              roomId: myRoom.id
+            }
+            showBuildPopup.value = true
+            playSfx('click')
+            return
+          }
+        }
+      }
+    }
+  }
+}
+
+// Handle canvas click - UI ONLY interactions, no movement
 const handleCanvasClick = (e: MouseEvent) => {
-  if (isDragging.value || !canvasRef.value) return
+  // Ignore if was dragging camera (moved beyond threshold)
+  if (hasDragged.value || !canvasRef.value) return
   
   const rect = canvasRef.value.getBoundingClientRect()
   const scaleX = viewportWidth.value / rect.width
@@ -642,32 +803,26 @@ const handleCanvasClick = (e: MouseEvent) => {
   if (!grid[cellY]?.[cellX]) return
   const cell = grid[cellY][cellX]
   
-  // Game is always in playing phase - full interaction allowed
+  // Game is always in playing phase - only UI interactions allowed via click
   if (gamePhase.value === 'playing' && humanPlayer.value?.alive) {
     // Check if player owns a room - use their owned room for building/upgrading
     const myRoom = humanPlayer.value.roomId !== null ? rooms.find(r => r.id === humanPlayer.value!.roomId) : null
     
-    // DOOR CLICK INTERACTION: Click on any door cell to show upgrade modal
-    // Fixed: Check if clicking on door position directly, not just the cell
+    // DOOR CLICK INTERACTION: Click on any door cell to show upgrade modal (UI only)
     if (cell.type === 'door' && cell.roomId !== undefined) {
       const clickedRoom = rooms.find(r => r.id === cell.roomId)
       if (clickedRoom && clickedRoom.ownerId === humanPlayer.value.id) {
         // Player owns this door - show upgrade modal
+        // Allow from anywhere when sleeping, otherwise check distance
         const distToDoor = distance(humanPlayer.value.position, clickedRoom.doorPosition)
-        if (distToDoor < GAME_CONSTANTS.CELL_SIZE * 4) {
+        if (humanPlayer.value.isSleeping || distToDoor < GAME_CONSTANTS.CELL_SIZE * 4) {
           upgradeTarget.value = { type: 'door', room: clickedRoom }
           showUpgradeModal.value = true
           playSfx('click')
           return
-        } else {
-          // Too far - move toward door
-          humanPlayer.value.targetPosition = { ...clickedRoom.doorPosition }
-          const walkableGrid = createWalkableGrid(humanPlayer.value.id, false)
-          humanPlayer.value.path = findPath(walkableGrid, humanPlayer.value.position, humanPlayer.value.targetPosition, GAME_CONSTANTS.CELL_SIZE)
-          humanPlayer.value.state = 'walking'
-          addMessage('Moving to door...')
-          return
         }
+        // If too far, do nothing (no auto-move)
+        return
       }
     }
     
@@ -676,7 +831,8 @@ const handleCanvasClick = (e: MouseEvent) => {
       const distToBedClick = distance({ x: worldX, y: worldY }, myRoom.bedPosition)
       if (distToBedClick < 40) {
         const playerDistToBed = distance(humanPlayer.value.position, myRoom.bedPosition)
-        if (playerDistToBed < GAME_CONSTANTS.BED_INTERACT_RANGE) {
+        // Allow bed interaction when sleeping OR when close enough
+        if (humanPlayer.value.isSleeping || playerDistToBed < GAME_CONSTANTS.BED_INTERACT_RANGE) {
           // If sleeping, show upgrade modal. Otherwise start sleeping.
           if (humanPlayer.value.isSleeping) {
             // Show upgrade modal for bed
@@ -690,29 +846,26 @@ const handleCanvasClick = (e: MouseEvent) => {
             humanPlayer.value.state = 'sleeping'
             humanPlayer.value.position.x = myRoom.bedPosition.x
             humanPlayer.value.position.y = myRoom.bedPosition.y
+            humanPlayer.value.targetPosition = null
+            humanPlayer.value.path = []
             playSfx('click')
-            addMessage('Started sleeping - earning gold!')
+            addMessage(t('messages.startedSleeping'))
             return
           }
-        } else {
-          // Move to bed
-          humanPlayer.value.targetPosition = { ...myRoom.bedPosition }
-          const walkableGrid = createWalkableGrid(humanPlayer.value.id, false)
-          humanPlayer.value.path = findPath(walkableGrid, humanPlayer.value.position, humanPlayer.value.targetPosition, GAME_CONSTANTS.CELL_SIZE)
-          humanPlayer.value.state = 'walking'
-          return
         }
+        // If too far to bed, do nothing (no auto-move)
+        return
       }
       
-      // MODAL UPGRADE: Click on existing building to show upgrade/sell modal
+      // MODAL UPGRADE: Click on existing building to show upgrade/sell modal (UI only)
       for (const building of buildings) {
         if (building.ownerId !== humanPlayer.value.id || building.hp <= 0) continue
         const bPos = gridToWorld({ x: building.gridX, y: building.gridY }, GAME_CONSTANTS.CELL_SIZE)
         const distToBuilding = distance({ x: worldX, y: worldY }, bPos)
         if (distToBuilding < 35) {
           const playerDistToBuilding = distance(humanPlayer.value.position, bPos)
-          if (playerDistToBuilding < GAME_CONSTANTS.CELL_SIZE * 3) {
-            // Show upgrade modal for building
+          if (playerDistToBuilding < GAME_CONSTANTS.CELL_SIZE * 3 || humanPlayer.value.isSleeping) {
+            // Show upgrade modal for building (allow from anywhere when sleeping)
             upgradeTarget.value = { type: 'building', building }
             showUpgradeModal.value = true
             playSfx('click')
@@ -743,46 +896,15 @@ const handleCanvasClick = (e: MouseEvent) => {
             return
           } else {
             // Spot has building - try to upgrade it instead
-            addMessage('This spot already has a building. Click on it to upgrade!')
+            addMessage(t('messages.spotHasBuilding'))
             return
           }
         }
       }
-    } else {
-      // Player doesn't own a room yet
-      if (cell.type === 'room' && cell.roomId !== undefined) {
-        addMessage('Find a room and SLEEP on the bed to claim it first!')
-      }
     }
     
-    // Don't move if sleeping
-    if (humanPlayer.value.isSleeping) return
-    
-    // WALL COLLISION: Block wall cells
-    if (cell.type === 'wall') return
-    
-    // Move player - check room entry rules  
-    if (cell.walkable || cell.type === 'door' || cell.type === 'room') {
-      // Check if trying to enter a room through door
-      if ((cell.type === 'room' || cell.type === 'door') && cell.roomId !== undefined) {
-        const targetRoom = rooms[cell.roomId]
-        if (targetRoom) {
-          const isOwnRoom = targetRoom.ownerId === humanPlayer.value.id
-          const isInSameRoom = humanPlayer.value.roomId === targetRoom.id
-          
-          // Can only enter if door is passable
-          if (!isOwnRoom && !isInSameRoom && !isDoorPassable(targetRoom, humanPlayer.value.id, false)) {
-            addMessage('Door is locked (someone sleeping)')
-            return
-          }
-        }
-      }
-      
-      humanPlayer.value.targetPosition = { x: worldX, y: worldY }
-      const walkableGrid = createWalkableGrid(humanPlayer.value.id, false)
-      humanPlayer.value.path = findPath(walkableGrid, humanPlayer.value.position, humanPlayer.value.targetPosition, GAME_CONSTANTS.CELL_SIZE)
-      humanPlayer.value.state = 'walking'
-    }
+    // NO CLICK-TO-MOVE - movement is only via directional controls
+    // Click on canvas does nothing for movement
   }
 }
 
@@ -797,7 +919,7 @@ const goToSleep = () => {
   
   // Must be inside a room cell
   if (!cell || (cell.type !== 'room' && cell.type !== 'door')) {
-    addMessage('Must be inside a room to sleep!')
+    addMessage(t('messages.mustBeInRoom'))
     return
   }
   
@@ -809,7 +931,7 @@ const goToSleep = () => {
   
   // Check if room is available or already owned by this player
   if (currentRoom.ownerId !== null && currentRoom.ownerId !== humanPlayer.value.id) {
-    addMessage('This room is already claimed!')
+    addMessage(t('messages.roomAlreadyClaimed'))
     return
   }
   
@@ -819,7 +941,7 @@ const goToSleep = () => {
     if (currentRoom.ownerId === null) {
       currentRoom.ownerId = humanPlayer.value.id
       humanPlayer.value.roomId = currentRoom.id
-      addMessage(`Claimed room ${currentRoom.id} (${currentRoom.roomType})!`)
+      addMessage(t('messages.claimedRoom', { roomId: currentRoom.id, roomType: getRoomTypeName(currentRoom.roomType) }))
     }
     
     // Auto-position player on the bed
@@ -833,64 +955,137 @@ const goToSleep = () => {
     humanPlayer.value.path = []
     humanPlayer.value.targetPosition = null
     playSfx('click')
-    addMessage(`Started sleeping - earning ${getGoldPerSecond(currentRoom)}💰/s!`)
+    addMessage(t('messages.startedSleepingWithGold', { gold: getGoldPerSecond(currentRoom) }))
   } else {
-    addMessage('Get closer to the bed!')
+    addMessage(t('messages.getCloserToBed'))
   }
 }
 
 // Mobile control: move player in direction
-const moveDirection = (dir: 'up' | 'down' | 'left' | 'right') => {
+// Continuous movement update - called every frame
+const updatePlayerMovement = (deltaTime: number) => {
   if (!humanPlayer.value || !humanPlayer.value.alive || humanPlayer.value.isSleeping) return
   if (gamePhase.value !== 'playing') return
   
-  const moveStep = GAME_CONSTANTS.CELL_SIZE
-  let targetX = humanPlayer.value.position.x
-  let targetY = humanPlayer.value.position.y
-  
-  switch (dir) {
-    case 'up': targetY -= moveStep; break
-    case 'down': targetY += moveStep; break
-    case 'left': targetX -= moveStep; break
-    case 'right': targetX += moveStep; break
+  // Check if any movement input is active
+  const hasInput = moveInput.up || moveInput.down || moveInput.left || moveInput.right
+  if (!hasInput) {
+    // No input - let pathfinding finish if there's a path
+    return
   }
   
-  // Clamp to world bounds
-  targetX = Math.max(GAME_CONSTANTS.CELL_SIZE, Math.min(GAME_CONSTANTS.WORLD_WIDTH - GAME_CONSTANTS.CELL_SIZE, targetX))
-  targetY = Math.max(GAME_CONSTANTS.CELL_SIZE, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - GAME_CONSTANTS.CELL_SIZE, targetY))
+  // Calculate movement direction
+  let dx = 0
+  let dy = 0
+  if (moveInput.up) dy -= 1
+  if (moveInput.down) dy += 1
+  if (moveInput.left) dx -= 1
+  if (moveInput.right) dx += 1
   
-  const cellX = Math.floor(targetX / GAME_CONSTANTS.CELL_SIZE)
-  const cellY = Math.floor(targetY / GAME_CONSTANTS.CELL_SIZE)
+  // Normalize diagonal movement
+  if (dx !== 0 && dy !== 0) {
+    const len = Math.sqrt(dx * dx + dy * dy)
+    dx /= len
+    dy /= len
+  }
+  
+  // Calculate new position
+  const speed = humanPlayer.value.speed * deltaTime
+  let newX = humanPlayer.value.position.x + dx * speed
+  let newY = humanPlayer.value.position.y + dy * speed
+  
+  // Clamp to world bounds
+  newX = Math.max(GAME_CONSTANTS.CELL_SIZE, Math.min(GAME_CONSTANTS.WORLD_WIDTH - GAME_CONSTANTS.CELL_SIZE, newX))
+  newY = Math.max(GAME_CONSTANTS.CELL_SIZE, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - GAME_CONSTANTS.CELL_SIZE, newY))
+  
+  // Check collision at new position
+  const cellX = Math.floor(newX / GAME_CONSTANTS.CELL_SIZE)
+  const cellY = Math.floor(newY / GAME_CONSTANTS.CELL_SIZE)
   
   if (!grid[cellY]?.[cellX]) return
   const cell = grid[cellY][cellX]
   
-  // Check if can enter room (need to go through door)
-  if ((cell.type === 'room' || cell.type === 'door') && cell.roomId !== undefined) {
-    const room = rooms[cell.roomId]
-    if (room && !isDoorPassable(room, humanPlayer.value.id, false)) {
-      addMessage('Door is locked (someone sleeping)')
-      return
+  // WALL COLLISION: Block wall cells
+  if (cell.type === 'wall') {
+    // Try sliding along walls
+    const cellXOnly = Math.floor((humanPlayer.value.position.x + dx * speed) / GAME_CONSTANTS.CELL_SIZE)
+    const cellYOnly = Math.floor((humanPlayer.value.position.y + dy * speed) / GAME_CONSTANTS.CELL_SIZE)
+    
+    // Try X only
+    const cellAtX = grid[Math.floor(humanPlayer.value.position.y / GAME_CONSTANTS.CELL_SIZE)]?.[cellXOnly]
+    if (cellAtX && cellAtX.type !== 'wall') {
+      newX = humanPlayer.value.position.x + dx * speed
+      newY = humanPlayer.value.position.y
+    } 
+    // Try Y only
+    else {
+      const cellAtY = grid[cellYOnly]?.[Math.floor(humanPlayer.value.position.x / GAME_CONSTANTS.CELL_SIZE)]
+      if (cellAtY && cellAtY.type !== 'wall') {
+        newX = humanPlayer.value.position.x
+        newY = humanPlayer.value.position.y + dy * speed
+      } else {
+        return // Completely blocked
+      }
     }
   }
   
-  // WALL COLLISION: Always block wall cells
-  if (cell.type === 'wall') {
-    return // Cannot walk through walls!
+  // Check room entry
+  const finalCellX = Math.floor(newX / GAME_CONSTANTS.CELL_SIZE)
+  const finalCellY = Math.floor(newY / GAME_CONSTANTS.CELL_SIZE)
+  const finalCell = grid[finalCellY]?.[finalCellX]
+  
+  if (finalCell && (finalCell.type === 'room' || finalCell.type === 'door') && finalCell.roomId !== undefined) {
+    const room = rooms[finalCell.roomId]
+    if (room && !isDoorPassable(room, humanPlayer.value.id, false)) {
+      return // Door locked
+    }
   }
   
-  if (cell.walkable || cell.type === 'door' || cell.type === 'room') {
-    humanPlayer.value.targetPosition = { x: targetX, y: targetY }
-    const walkableGrid = createWalkableGrid(humanPlayer.value.id, false)
-    humanPlayer.value.path = findPath(walkableGrid, humanPlayer.value.position, humanPlayer.value.targetPosition, GAME_CONSTANTS.CELL_SIZE)
+  // Apply movement
+  if (finalCell && (finalCell.walkable || finalCell.type === 'door' || finalCell.type === 'room')) {
+    humanPlayer.value.position.x = newX
+    humanPlayer.value.position.y = newY
     humanPlayer.value.state = 'walking'
+    humanPlayer.value.path = [] // Clear pathfinding - using direct movement
+    humanPlayer.value.targetPosition = null
+    
+    // Update facing direction
+    if (dx > 0) humanPlayer.value.facingRight = true
+    else if (dx < 0) humanPlayer.value.facingRight = false
+    
+    // Update animation
+    humanPlayer.value.animationTimer += deltaTime
+    if (humanPlayer.value.animationTimer >= GAME_CONSTANTS.ANIMATION_SPEED) {
+      humanPlayer.value.animationFrame = (humanPlayer.value.animationFrame + 1) % 4
+      humanPlayer.value.animationTimer = 0
+    }
   }
 }
 
 // Reset camera to follow player
 const resetCameraToPlayer = () => {
   cameraManualMode.value = false
-  addMessage('Camera following player')
+  addMessage(t('messages.cameraFollowing'))
+}
+
+// Navigate camera to a specific player's room
+const navigateToPlayer = (player: Player) => {
+  cameraManualMode.value = true
+  const targetX = player.smoothX - viewportWidth.value / 2
+  const targetY = player.smoothY - viewportHeight.value / 2
+  const pad = GAME_CONSTANTS.CAMERA_PADDING
+  camera.x = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_WIDTH - viewportWidth.value + pad, targetX))
+  camera.y = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight.value + pad, targetY))
+}
+
+// Navigate camera to monster's current position
+const navigateToMonster = () => {
+  cameraManualMode.value = true
+  const targetX = monster.position.x - viewportWidth.value / 2
+  const targetY = monster.position.y - viewportHeight.value / 2
+  const pad = GAME_CONSTANTS.CAMERA_PADDING
+  camera.x = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_WIDTH - viewportWidth.value + pad, targetX))
+  camera.y = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight.value + pad, targetY))
 }
 
 // Build defense (only in rooms)
@@ -901,7 +1096,7 @@ const buildDefense = (type: DefenseBuilding['type']) => {
   if (type === 'vanguard') {
     const goldCost = GAME_CONSTANTS.VANGUARD.GOLD_COST
     if (humanPlayer.value.gold < goldCost) {
-      addMessage(`Not enough gold! Need ${goldCost}g`)
+      addMessage(t('messages.notEnoughGoldNeed', { cost: goldCost }))
       return
     }
     humanPlayer.value.gold -= goldCost
@@ -911,13 +1106,13 @@ const buildDefense = (type: DefenseBuilding['type']) => {
     // ATM costs SOULS, other buildings cost GOLD
     if (type === 'atm') {
       if (humanPlayer.value.souls < cost) {
-        addMessage(`Not enough souls! Need ${cost} souls.`)
+        addMessage(t('messages.notEnoughSouls', { cost: cost }))
         return
       }
       humanPlayer.value.souls -= cost
     } else {
       if (humanPlayer.value.gold < cost) {
-        addMessage('Not enough gold!')
+        addMessage(t('messages.notEnoughGold'))
         return
       }
       humanPlayer.value.gold -= cost
@@ -959,7 +1154,7 @@ const buildDefense = (type: DefenseBuilding['type']) => {
   playSfx('build')
   spawnParticles(gridToWorld({ x, y }, GAME_CONSTANTS.CELL_SIZE), 'build', 12, '#22c55e')
   spawnFloatingText(gridToWorld({ x, y }, GAME_CONSTANTS.CELL_SIZE), `+${type}!`, '#22c55e', 14)
-  addMessage(`Built ${type} in room ${roomId}`)
+  addMessage(t('messages.builtInRoom', { type: getBuildingTypeName(type), roomId: roomId }))
   
   showBuildPopup.value = false
   selectedBuildSpot.value = null
@@ -1036,7 +1231,7 @@ const upgradeBed = () => {
   if (!room) return
   
   if (humanPlayer.value.gold < room.bedUpgradeCost) {
-    addMessage(`Not enough gold! Need ${room.bedUpgradeCost}g`)
+    addMessage(t('messages.notEnoughGoldNeed', { cost: room.bedUpgradeCost }))
     return
   }
   
@@ -1045,7 +1240,7 @@ const upgradeBed = () => {
   room.bedIncome = room.bedIncome * 2 // Double income
   room.bedUpgradeCost = room.bedUpgradeCost * 2 // Double cost for next upgrade
   playSfx('build')
-  addMessage(`Bed upgraded to Lv${room.bedLevel} (${room.bedIncome}g/s)`)
+  addMessage(t('messages.bedUpgraded', { level: room.bedLevel, income: room.bedIncome }))
   spawnFloatingText(room.bedPosition, `Bed LV${room.bedLevel}!`, '#fbbf24', 14)
   showUpgradeModal.value = false
 }
@@ -1057,12 +1252,12 @@ const upgradeDoor = () => {
   if (!room) return
   
   if (room.doorLevel >= 10) {
-    addMessage('Door is max level!')
+    addMessage(t('messages.doorMaxLevel'))
     return
   }
   
   if (humanPlayer.value.gold < room.doorUpgradeCost) {
-    addMessage('Not enough gold!')
+    addMessage(t('messages.notEnoughGold'))
     return
   }
   
@@ -1072,8 +1267,43 @@ const upgradeDoor = () => {
   room.doorHp = room.doorMaxHp // Full heal on upgrade!
   room.doorUpgradeCost = Math.floor(room.doorUpgradeCost * GAME_CONSTANTS.DOOR_UPGRADE_COST_SCALE) // +20% cost
   playSfx('build')
-  addMessage(`Door upgraded to Lv${room.doorLevel} (${room.doorMaxHp} HP)`)
+  addMessage(t('messages.doorUpgraded', { level: room.doorLevel, hp: room.doorMaxHp }))
   spawnFloatingText(room.doorPosition, `Door LV${room.doorLevel}!`, '#60a5fa', 14)
+  showUpgradeModal.value = false
+}
+
+// Rebuild destroyed door - reset to level 1 with base HP
+const DOOR_REBUILD_COST = 100 // Cost to rebuild a destroyed door
+const rebuildDoor = () => {
+  if (!humanPlayer.value || humanPlayer.value.roomId === null) return
+  const room = rooms.find(r => r.id === humanPlayer.value!.roomId)
+  if (!room) return
+  
+  if (room.doorHp > 0) {
+    addMessage(t('messages.doorNotDestroyed'))
+    return
+  }
+  
+  if (humanPlayer.value.gold < DOOR_REBUILD_COST) {
+    addMessage(t('messages.doorRebuildNeedGold', { cost: DOOR_REBUILD_COST }))
+    return
+  }
+  
+  humanPlayer.value.gold -= DOOR_REBUILD_COST
+  
+  // Reset door to level 1
+  room.doorLevel = 1
+  room.doorMaxHp = GAME_CONSTANTS.BASE_DOOR_HP
+  room.doorHp = room.doorMaxHp
+  room.doorUpgradeCost = GAME_CONSTANTS.COSTS.upgradeDoor
+  room.doorRepairCooldown = 0
+  room.doorIsRepairing = false
+  room.doorRepairTimer = 0
+  
+  playSfx('build')
+  spawnParticles(room.doorPosition, 'build', 12, '#22c55e')
+  spawnFloatingText(room.doorPosition, 'Door Rebuilt!', '#22c55e', 16)
+  addMessage(t('messages.doorRebuilt'))
   showUpgradeModal.value = false
 }
 
@@ -1084,19 +1314,19 @@ const startDoorRepair = () => {
   if (!room) return
   
   if (room.doorRepairCooldown > 0) {
-    addMessage(`Repair on cooldown: ${Math.ceil(room.doorRepairCooldown)}s`)
+    addMessage(t('messages.doorRepairCooldown', { time: Math.ceil(room.doorRepairCooldown) }))
     return
   }
   
   if (room.doorHp >= room.doorMaxHp) {
-    addMessage('Door is at full HP!')
+    addMessage(t('messages.doorFullHp'))
     return
   }
   
   room.doorIsRepairing = true
   room.doorRepairTimer = 0
   playSfx('build')
-  addMessage('Repairing door...')
+  addMessage(t('messages.doorRepairing'))
   showUpgradeModal.value = false
 }
 
@@ -1110,20 +1340,20 @@ const upgradeBuilding = () => {
   if (building.level >= 4) {
     const soulCost = GAME_CONSTANTS.SOUL_UPGRADE_COST * (building.level - 3)
     if (humanPlayer.value.souls < soulCost) {
-      addMessage(`Need ${soulCost} souls for level ${building.level + 1}!`)
+      addMessage(t('messages.needSoulsForLevel', { cost: soulCost, level: building.level + 1 }))
       return
     }
     humanPlayer.value.souls -= soulCost
   }
   
   if (building.level >= 10) {
-    addMessage(`${building.type} is max level!`)
+    addMessage(t('messages.buildingMaxLevel', { type: getBuildingTypeName(building.type) }))
     showUpgradeModal.value = false
     return
   }
   
   if (humanPlayer.value.gold < building.upgradeCost) {
-    addMessage(`Need ${building.upgradeCost}g to upgrade!`)
+    addMessage(t('messages.needGoldToUpgrade', { cost: building.upgradeCost }))
     return
   }
   
@@ -1143,7 +1373,7 @@ const upgradeBuilding = () => {
   } else if (building.type === 'vanguard') {
     // Vanguard: spawn/update units with better stats
     spawnVanguardUnits(building)
-    addMessage(`Vanguard upgraded! Units: ${getVanguardUnitCount(building.level)}`)
+    addMessage(t('messages.vanguardUpgraded', { units: getVanguardUnitCount(building.level) }))
   } else {
     // Other buildings: standard scaling
     building.damage = getBuildingDamage(building.baseDamage, building.level)
@@ -1157,7 +1387,7 @@ const upgradeBuilding = () => {
   const bPos = gridToWorld({ x: building.gridX, y: building.gridY }, GAME_CONSTANTS.CELL_SIZE)
   spawnFloatingText(bPos, `LV${building.level}!`, '#60a5fa', 14)
   spawnParticles(bPos, 'build', 8, '#60a5fa')
-  addMessage(`${building.type} upgraded to Lv${building.level}!`)
+  addMessage(t('messages.buildingUpgraded', { type: getBuildingTypeName(building.type), level: building.level }))
   showUpgradeModal.value = false
 }
 
@@ -1181,7 +1411,7 @@ const sellBuilding = () => {
   if (idx !== -1) buildings.splice(idx, 1)
   
   playSfx('click')
-  addMessage(`Sold ${building.type} for ${refund}g!`)
+  addMessage(t('messages.soldBuilding', { type: getBuildingTypeName(building.type), refund: refund }))
   showUpgradeModal.value = false
 }
 
@@ -1274,15 +1504,15 @@ const enforceLatePlayerPenalty = () => {
       }
       
       if (player.isHuman) {
-        addMessage('⚠️ You were caught outside! Monster is hunting you!')
+        addMessage(t('messages.caughtOutside'))
       } else {
-        addMessage(`${player.name} was caught outside!`)
+        addMessage(t('messages.playerCaughtOutside', { name: player.name }))
       }
     }
   })
   
   if (latePlayers.length > 0) {
-    addMessage(`🎯 Monster targeting late players first!`)
+    addMessage(t('messages.monsterTargetingLate'))
   }
 }
 
@@ -1303,7 +1533,7 @@ const updateMonsterAI = (deltaTime: number) => {
     monster.damage = Math.floor(monster.baseDamage * Math.pow(GAME_CONSTANTS.MONSTER_DAMAGE_SCALE, monster.level - 1))
     monster.maxHp = Math.floor(GAME_CONSTANTS.MONSTER_MAX_HP * Math.pow(GAME_CONSTANTS.MONSTER_HP_SCALE, monster.level - 1))
     monster.hp = monster.maxHp // FULL HEAL on level up!
-    addMessage(`🐉 Monster LV${monster.level}! (DMG: ${monster.damage}, HP: ${monster.maxHp})`)
+    addMessage(t('messages.monsterSpawned', { level: monster.level, damage: monster.damage, hp: monster.maxHp }))
     spawnFloatingText(monster.position, `LV ${monster.level}!`, '#ff6b6b', 20)
   }
   
@@ -1349,7 +1579,7 @@ const updateMonsterAI = (deltaTime: number) => {
       monster.speed = monster.baseSpeed
       monster.targetPlayerId = null
       monster.monsterState = 're-engage'
-      addMessage('🐉 Monster fully rested and hunting again!')
+      addMessage(t('messages.monsterFullyRested'))
     }
     return
   }
@@ -1364,7 +1594,7 @@ const updateMonsterAI = (deltaTime: number) => {
       monster.speed = monster.baseSpeed * GAME_CONSTANTS.MONSTER_RETREAT_SPEED_BONUS
       monster.targetPlayerId = null
       monster.targetTimer = 0
-      addMessage('🐉 Monster retreating to heal! (Committed to full heal)')
+      addMessage(t('messages.monsterRetreating'))
     }
     
     const nearestNest = findNearestNest()
@@ -1404,7 +1634,7 @@ const updateMonsterAI = (deltaTime: number) => {
     
     // DISENGAGE after 30 seconds on same target
     if (monster.targetTimer >= GAME_CONSTANTS.MONSTER_TARGET_TIMEOUT) {
-      addMessage('🐉 Monster disengaging from target!')
+      addMessage(t('messages.monsterDisengaging'))
       // Add current target to last targets list
       if (!monster.lastTargets.includes(monster.targetPlayerId)) {
         monster.lastTargets.push(monster.targetPlayerId)
@@ -1493,7 +1723,7 @@ const updateMonsterAI = (deltaTime: number) => {
       monster.targetPlayerId = newTarget.id
       monster.targetTimer = 0
       monster.monsterState = 'attack'
-      addMessage(`🐉 Monster targeting ${newTarget.name}!`)
+      addMessage(t('messages.monsterTargeting', { name: newTarget.name }))
     } else {
       monster.state = 'idle'
       monster.monsterState = 'search'
@@ -1530,7 +1760,7 @@ const updateMonsterAI = (deltaTime: number) => {
         targetPlayer.hp = 0
         targetPlayer.alive = false
         targetPlayer.state = 'dying'
-        addMessage(`${targetPlayer.name} was killed!`)
+        addMessage(t('messages.playerKilled', { name: targetPlayer.name }))
         monster.targetPlayerId = null
         monster.targetTimer = 0
         if (targetPlayer.isHuman) endGame(false)
@@ -1565,7 +1795,7 @@ const updateMonsterAI = (deltaTime: number) => {
       
       if (obstacleInRange.hp <= 0) {
         obstacleInRange.hp = 0
-        addMessage(`Monster destroyed ${obstacleInRange.type}!`)
+        addMessage(t('messages.monsterDestroyedBuilding', { type: getBuildingTypeName(obstacleInRange.type) }))
         spawnFloatingText(bPos, '💥', '#ff6b6b', 18)
         spawnParticles(bPos, 'explosion', 15, '#ff6b6b')
       }
@@ -1590,7 +1820,7 @@ const updateMonsterAI = (deltaTime: number) => {
         
         if (playerRoom.doorHp <= 0) {
           playerRoom.doorHp = 0
-          addMessage(`Room ${playerRoom.id} door destroyed!`)
+          addMessage(t('messages.roomDoorDestroyed', { roomId: playerRoom.id }))
           spawnFloatingText(doorPos, '💥 DESTROYED!', '#ff6b6b', 20)
         }
       }
@@ -1652,15 +1882,72 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     // Calculate structure levels
     const maxTurretLevel = myTurrets.length > 0 ? Math.max(...myTurrets.map(t => t.level)) : 0
     
-    // Find empty build spot (exclude destroyed buildings with hp <= 0)
-    const findEmptySpot = (): Vector2 | null => {
-      return myRoom.buildSpots.find(spot => {
+    // Find empty build spot - PRIORITIZE spots closer to door for turrets
+    const findEmptySpot = (prioritizeNearDoor: boolean = false): Vector2 | null => {
+      const emptySpots = myRoom.buildSpots.filter(spot => {
         return !buildings.some(b => {
           if (b.hp <= 0) return false // Destroyed buildings don't block
           const bPos = gridToWorld({ x: b.gridX, y: b.gridY }, GAME_CONSTANTS.CELL_SIZE)
           return distance(bPos, spot) < 30
         })
-      }) || null
+      })
+      
+      if (emptySpots.length === 0) return null
+      
+      if (prioritizeNearDoor) {
+        // Sort by distance to door - closest first
+        emptySpots.sort((a, b) => {
+          const distA = distance(a, myRoom.doorPosition)
+          const distB = distance(b, myRoom.doorPosition)
+          return distA - distB
+        })
+      }
+      
+      return emptySpots[0] || null
+    }
+    
+    // Find best spot specifically for turret - near door for maximum effectiveness
+    const findBestTurretSpot = (): Vector2 | null => {
+      const emptySpots = myRoom.buildSpots.filter(spot => {
+        return !buildings.some(b => {
+          if (b.hp <= 0) return false
+          const bPos = gridToWorld({ x: b.gridX, y: b.gridY }, GAME_CONSTANTS.CELL_SIZE)
+          return distance(bPos, spot) < 30
+        })
+      })
+      
+      if (emptySpots.length === 0) return null
+      
+      // Score each spot based on strategic value
+      const scoredSpots = emptySpots.map(spot => {
+        let score = 100
+        
+        // Primary: Distance to door (closer = better for defense)
+        const distToDoor = distance(spot, myRoom.doorPosition)
+        score -= distToDoor * 0.5 // Penalty for being far from door
+        
+        // Bonus: If within turret range of door position
+        const turretRange = GAME_CONSTANTS.BUILDINGS.turret.range
+        if (distToDoor <= turretRange) {
+          score += 50 // Big bonus for covering the door
+        }
+        
+        // Bonus: Not too close to existing turrets (spread fire)
+        const nearbyTurrets = myTurrets.filter(t => {
+          const tPos = gridToWorld({ x: t.gridX, y: t.gridY }, GAME_CONSTANTS.CELL_SIZE)
+          return distance(spot, tPos) < 80
+        })
+        if (nearbyTurrets.length === 0) {
+          score += 20 // Bonus for good spacing
+        }
+        
+        return { spot, score }
+      })
+      
+      // Sort by score descending
+      scoredSpots.sort((a, b) => b.score - a.score)
+      
+      return scoredSpots[0]?.spot || null
     }
     
     // =====================================================================
@@ -1721,19 +2008,21 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     }
     
     // ------------------------------------------------------------------
-    // ACTION 3: UPGRADE BED (Economy scaling - important in low threat)
+    // ACTION 3: UPGRADE BED (Economy scaling - HIGH PRIORITY)
     // ------------------------------------------------------------------
     if (player.gold >= myRoom.bedUpgradeCost) {
-      let score = 70
-      // Bed lagging behind other structures = high priority
+      let score = 100 // Increased base score for bed priority
+      // Bed lagging behind other structures = very high priority
       const maxStructureLevel = Math.max(myRoom.doorLevel, maxTurretLevel)
-      if (myRoom.bedLevel < maxStructureLevel) score += 50
+      if (myRoom.bedLevel < maxStructureLevel) score += 60
+      // Early game bed upgrades are crucial for economy
+      if (myRoom.bedLevel < 3) score += 40
       // Low threat = focus on economy
-      if (threatLevel === 'low') score *= 1.8
+      if (threatLevel === 'low') score *= 1.5
       else if (threatLevel === 'medium') score *= 1.2
-      // High threat = delay economy
-      else if (threatLevel === 'high') score *= 0.5
-      else if (threatLevel === 'critical') score *= 0.2
+      // High threat = delay economy slightly but still important
+      else if (threatLevel === 'high') score *= 0.7
+      else if (threatLevel === 'critical') score *= 0.3
       
       actions.push({
         action: 'upgrade_bed',
@@ -1750,9 +2039,10 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     
     // ------------------------------------------------------------------
     // ACTION 4: BUILD TURRET (Defense - priority when few turrets)
+    // Use findBestTurretSpot for strategic placement near door
     // ------------------------------------------------------------------
-    const emptySpot = findEmptySpot()
-    if (myTurrets.length < 4 && player.gold >= GAME_CONSTANTS.COSTS.turret && emptySpot) {
+    const turretSpot = findBestTurretSpot()
+    if (myTurrets.length < 4 && player.gold >= GAME_CONSTANTS.COSTS.turret && turretSpot) {
       let score = 60
       // First turret is critical
       if (myTurrets.length === 0) score += 80
@@ -1764,7 +2054,7 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
         action: 'build_turret',
         score,
         execute: () => {
-          const result = BotAI.executeBuildStructure(player, buildings, 'turret', emptySpot, GAME_CONSTANTS.CELL_SIZE)
+          const result = BotAI.executeBuildStructure(player, buildings, 'turret', turretSpot, GAME_CONSTANTS.CELL_SIZE)
           if (result.success && result.floatingText) {
             spawnFloatingText(result.floatingText.position, result.floatingText.text, result.floatingText.color, result.floatingText.size)
           }
@@ -1800,7 +2090,8 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     // ------------------------------------------------------------------
     // ACTION 6: BUILD SOUL COLLECTOR (Economy - needed for ATM)
     // ------------------------------------------------------------------
-    if (mySoulCollectors.length === 0 && player.gold >= GAME_CONSTANTS.COSTS.soulCollector && emptySpot) {
+    const economySpot = findEmptySpot()
+    if (mySoulCollectors.length === 0 && player.gold >= GAME_CONSTANTS.COSTS.soulCollector && economySpot) {
       let score = 40
       // Only build if we have basic defense
       if (myTurrets.length >= 2 && myRoom.doorLevel >= 2) score += 30
@@ -1812,7 +2103,9 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
         action: 'build_soul_collector',
         score,
         execute: () => {
-          const result = BotAI.executeBuildStructure(player, buildings, 'soul_collector', emptySpot, GAME_CONSTANTS.CELL_SIZE)
+          const spot = findEmptySpot() // Re-check spot at execution time
+          if (!spot) return false
+          const result = BotAI.executeBuildStructure(player, buildings, 'soul_collector', spot, GAME_CONSTANTS.CELL_SIZE)
           if (result.success && result.floatingText) {
             spawnFloatingText(result.floatingText.position, result.floatingText.text, result.floatingText.color, result.floatingText.size)
           }
@@ -1824,7 +2117,7 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     // ------------------------------------------------------------------
     // ACTION 7: BUILD ATM (Late-game economy - costs SOULS)
     // ------------------------------------------------------------------
-    if (myATMs.length === 0 && mySoulCollectors.length > 0 && player.souls >= GAME_CONSTANTS.COSTS.atm && emptySpot) {
+    if (myATMs.length === 0 && mySoulCollectors.length > 0 && player.souls >= GAME_CONSTANTS.COSTS.atm && economySpot) {
       let score = 45
       // Low threat = economy focus
       if (threatLevel === 'low') score *= 1.5
@@ -1834,7 +2127,9 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
         action: 'build_atm',
         score,
         execute: () => {
-          const result = BotAI.executeBuildStructure(player, buildings, 'atm', emptySpot, GAME_CONSTANTS.CELL_SIZE)
+          const spot = findEmptySpot() // Re-check spot at execution time
+          if (!spot) return false
+          const result = BotAI.executeBuildStructure(player, buildings, 'atm', spot, GAME_CONSTANTS.CELL_SIZE)
           if (result.success && result.floatingText) {
             spawnFloatingText(result.floatingText.position, result.floatingText.text, result.floatingText.color, result.floatingText.size)
           }
@@ -1887,6 +2182,92 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
             spawnFloatingText(result.floatingText.position, result.floatingText.text, result.floatingText.color, result.floatingText.size)
           }
           return result.success
+        }
+      })
+    }
+    
+    // ------------------------------------------------------------------
+    // ACTION 10: BUILD VANGUARD (Mobile defense units)
+    // ------------------------------------------------------------------
+    const myVanguards = buildings.filter(b => b.ownerId === player.id && b.type === 'vanguard' && b.hp > 0)
+    const vanguardSpot = findEmptySpot()
+    if (myVanguards.length < 2 && player.gold >= GAME_CONSTANTS.VANGUARD.GOLD_COST && vanguardSpot) {
+      let score = 55
+      // First vanguard is valuable for mobile defense
+      if (myVanguards.length === 0) score += 30
+      // Build vanguard when we have basic defenses
+      if (myTurrets.length >= 1 && myRoom.doorLevel >= 2) score += 20
+      // High threat = more defensive units
+      if (threatLevel === 'high' || threatLevel === 'critical') score *= 1.3
+      // Low threat = less priority
+      if (threatLevel === 'low') score *= 0.8
+      
+      actions.push({
+        action: 'build_vanguard',
+        score,
+        execute: () => {
+          const spot = findEmptySpot()
+          if (!spot) return false
+          if (player.gold < GAME_CONSTANTS.VANGUARD.GOLD_COST) return false
+          
+          player.gold -= GAME_CONSTANTS.VANGUARD.GOLD_COST
+          
+          const gridX = Math.floor(spot.x / GAME_CONSTANTS.CELL_SIZE)
+          const gridY = Math.floor(spot.y / GAME_CONSTANTS.CELL_SIZE)
+          
+          const building: DefenseBuilding = {
+            id: buildings.length,
+            type: 'vanguard',
+            level: 1,
+            gridX,
+            gridY,
+            hp: GAME_CONSTANTS.BUILDINGS.vanguard.hp,
+            maxHp: GAME_CONSTANTS.BUILDINGS.vanguard.hp,
+            damage: 0,
+            baseDamage: 0,
+            range: 0,
+            baseRange: 0,
+            cooldown: 0,
+            currentCooldown: 0,
+            ownerId: player.id,
+            animationFrame: 0,
+            rotation: 0,
+            upgradeCost: GAME_CONSTANTS.VANGUARD.UPGRADE_COST
+          }
+          
+          buildings.push(building)
+          spawnVanguardUnits(building)
+          
+          spawnParticles(spot, 'build', 12, '#6366f1')
+          spawnFloatingText(spot, '+Vanguard!', '#6366f1', 14)
+          return true
+        }
+      })
+    }
+    
+    // ------------------------------------------------------------------
+    // ACTION 11: UPGRADE VANGUARD (More units + better stats)
+    // ------------------------------------------------------------------
+    const upgradableVanguard = myVanguards.find(v => v.level < 7 && player.gold >= v.upgradeCost)
+    if (upgradableVanguard) {
+      let score = 45
+      // Upgrade valuable when have vanguards
+      if (threatLevel === 'high' || threatLevel === 'critical') score *= 1.4
+      // Higher level = more units
+      if (upgradableVanguard.level < 3) score += 20 // Get to 2 units
+      
+      actions.push({
+        action: 'upgrade_vanguard',
+        score,
+        execute: () => {
+          if (player.gold < upgradableVanguard.upgradeCost) return false
+          player.gold -= upgradableVanguard.upgradeCost
+          upgradableVanguard.level++
+          upgradableVanguard.upgradeCost *= 2
+          spawnVanguardUnits(upgradableVanguard)
+          const pos = gridToWorld({ x: upgradableVanguard.gridX, y: upgradableVanguard.gridY }, GAME_CONSTANTS.CELL_SIZE)
+          spawnFloatingText(pos, `⚔️ LV${upgradableVanguard.level}!`, '#6366f1', 14)
+          return true
         }
       })
     }
@@ -2034,8 +2415,10 @@ const updateVanguardAI = (deltaTime: number) => {
     const distToMonster = distance(unit.position, monster.position)
     const monsterAlive = monster.hp > 0
     
-    // STATE: CHASING/ATTACKING - pursue monster
-    if (monsterAlive && distToMonster < VANGUARD.DETECTION_RANGE) {
+    // STATE: CHASING/ATTACKING - pursue monster (increased detection range)
+    const effectiveDetectionRange = VANGUARD.DETECTION_RANGE * 2 // Double detection range for better engagement
+    
+    if (monsterAlive && distToMonster < effectiveDetectionRange) {
       unit.targetMonsterId = true
       
       // In attack range
@@ -2061,21 +2444,42 @@ const updateVanguardAI = (deltaTime: number) => {
           }
         }
       } else {
-        // Move towards monster
+        // Move towards monster - IMPROVED PATHFINDING
         unit.state = 'chasing'
-        const walkableGrid = createWalkableGrid(-1, false)
-        unit.path = findPath(walkableGrid, unit.position, monster.position, GAME_CONSTANTS.CELL_SIZE)
         
+        // Only recalculate path if:
+        // 1. Path is empty
+        // 2. Monster moved significantly (> 100px from last target)
+        // 3. Every 0.5 seconds for path refresh
+        const shouldRecalcPath = unit.path.length === 0 || 
+          (unit.targetPosition && distance(monster.position, unit.targetPosition) > 100)
+        
+        if (shouldRecalcPath) {
+          const walkableGrid = createWalkableGrid(-1, false, true) // isVanguard=true
+          const newPath = findPath(walkableGrid, unit.position, monster.position, GAME_CONSTANTS.CELL_SIZE)
+          
+          if (newPath.length > 0) {
+            unit.path = newPath
+            unit.targetPosition = { ...monster.position }
+          }
+        }
+        
+        // Follow path or move directly
         if (unit.path.length > 0) {
           const nextPos = unit.path[0]!
           unit.facingRight = nextPos.x > unit.position.x
-          unit.position = moveTowards(unit.position, nextPos, unit.speed, deltaTime)
-          if (distance(unit.position, nextPos) < 5) {
+          const newPosition = moveTowards(unit.position, nextPos, unit.speed, deltaTime)
+          unit.position.x = newPosition.x
+          unit.position.y = newPosition.y
+          
+          if (distance(unit.position, nextPos) < 8) {
             unit.path.shift()
           }
         } else {
-          // Direct movement if no path
-          unit.position = moveTowards(unit.position, monster.position, unit.speed, deltaTime)
+          // Direct movement if no path found - always move toward monster
+          const newPosition = moveTowards(unit.position, monster.position, unit.speed, deltaTime)
+          unit.position.x = newPosition.x
+          unit.position.y = newPosition.y
           unit.facingRight = monster.position.x > unit.position.x
         }
       }
@@ -2084,21 +2488,26 @@ const updateVanguardAI = (deltaTime: number) => {
       unit.state = 'roaming'
       unit.targetMonsterId = false
       
-      // Random roaming
-      if (!unit.targetPosition || distance(unit.position, unit.targetPosition) < 20) {
-        // Pick new random position within map bounds
+      // Random roaming - pick new target when close or no path
+      const needNewTarget = !unit.targetPosition || 
+        distance(unit.position, unit.targetPosition) < 30 ||
+        unit.path.length === 0
+      
+      if (needNewTarget) {
+        // Pick random position biased toward map center (where action is)
         const centerX = GAME_CONSTANTS.WORLD_WIDTH / 2
         const centerY = GAME_CONSTANTS.WORLD_HEIGHT / 2
-        const roamRange = 400
+        const roamRange = 500
         
+        // Bias toward center with some randomness
         unit.targetPosition = {
-          x: Math.max(50, Math.min(GAME_CONSTANTS.WORLD_WIDTH - 50, 
-              centerX + (Math.random() - 0.5) * roamRange * 2)),
-          y: Math.max(50, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - 50, 
-              centerY + (Math.random() - 0.5) * roamRange * 2))
+          x: Math.max(100, Math.min(GAME_CONSTANTS.WORLD_WIDTH - 100, 
+              centerX + (Math.random() - 0.5) * roamRange)),
+          y: Math.max(100, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - 100, 
+              centerY + (Math.random() - 0.5) * roamRange))
         }
         
-        const walkableGrid = createWalkableGrid(-1, false)
+        const walkableGrid = createWalkableGrid(-1, false, true) // isVanguard=true
         unit.path = findPath(walkableGrid, unit.position, unit.targetPosition, GAME_CONSTANTS.CELL_SIZE)
       }
       
@@ -2106,10 +2515,19 @@ const updateVanguardAI = (deltaTime: number) => {
       if (unit.path.length > 0) {
         const nextPos = unit.path[0]!
         unit.facingRight = nextPos.x > unit.position.x
-        unit.position = moveTowards(unit.position, nextPos, unit.speed * 0.5, deltaTime) // Slower roaming
-        if (distance(unit.position, nextPos) < 5) {
+        const newPosition = moveTowards(unit.position, nextPos, unit.speed * 0.6, deltaTime) // Slightly slower roaming
+        unit.position.x = newPosition.x
+        unit.position.y = newPosition.y
+        
+        if (distance(unit.position, nextPos) < 8) {
           unit.path.shift()
         }
+      } else if (unit.targetPosition) {
+        // Direct movement to target if no path
+        const newPosition = moveTowards(unit.position, unit.targetPosition, unit.speed * 0.6, deltaTime)
+        unit.position.x = newPosition.x
+        unit.position.y = newPosition.y
+        unit.facingRight = unit.targetPosition.x > unit.position.x
       }
     }
     
@@ -2148,7 +2566,8 @@ const updateBuildings = (deltaTime: number) => {
           damage: actualDamage,
           ownerId: building.ownerId,
           color: '#3b82f6',
-          size: 5
+          size: 5,
+          isHoming: true // Homing projectile - tracks monster
         })
         building.currentCooldown = building.cooldown
         playSfx('attack')
@@ -2162,6 +2581,13 @@ const updateProjectiles = (deltaTime: number) => {
   for (let i = projectiles.length - 1; i >= 0; i--) {
     const proj = projectiles[i]
     if (!proj) continue
+    
+    // Homing projectiles track the monster's current position
+    if (proj.isHoming && monster.hp > 0) {
+      proj.target.x = monster.position.x
+      proj.target.y = monster.position.y
+    }
+    
     const moved = moveTowards(proj.position, proj.target, proj.speed, deltaTime)
     proj.position.x = moved.x
     proj.position.y = moved.y
@@ -2175,7 +2601,8 @@ const updateProjectiles = (deltaTime: number) => {
       continue
     }
     
-    if (distance(proj.position, proj.target) < 10) projectiles.splice(i, 1)
+    // Non-homing projectiles disappear when reaching original target
+    if (!proj.isHoming && distance(proj.position, proj.target) < 10) projectiles.splice(i, 1)
   }
 }
 
@@ -2258,8 +2685,9 @@ const updateCamera = () => {
     camera.y += (targetY - camera.y) * 0.05
   }
   
-  camera.x = Math.max(0, Math.min(GAME_CONSTANTS.WORLD_WIDTH - viewportWidth.value, camera.x))
-  camera.y = Math.max(0, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight.value, camera.y))
+  const pad = cameraManualMode.value ? GAME_CONSTANTS.CAMERA_PADDING : 0
+  camera.x = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_WIDTH - viewportWidth.value + pad, camera.x))
+  camera.y = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight.value + pad, camera.y))
   
   // Update near bed detection - show sleep button when inside ANY room and near bed
   if (humanPlayer.value.alive && !humanPlayer.value.isSleeping) {
@@ -2313,7 +2741,7 @@ const gameLoop = (timestamp: number) => {
     
     if (countdown.value <= 0) {
       monsterActive.value = true
-      addMessage('👹 Monster is now hunting!')
+      addMessage(t('messages.monsterHunting'))
       playSfx('click')
       
       // LATE PLAYER ENFORCEMENT - players not sleeping get targeted!
@@ -2322,6 +2750,9 @@ const gameLoop = (timestamp: number) => {
   }
   
   if (gamePhase.value === 'playing') {
+    // Update human player continuous movement first
+    updatePlayerMovement(deltaTime)
+    
     players.forEach(player => {
       if (!player.alive) return
       
@@ -2385,7 +2816,7 @@ const gameLoop = (timestamp: number) => {
           // Notify owner
           const owner = players.find(p => p.id === room.ownerId)
           if (owner?.isHuman) {
-            addMessage('Door repair complete!')
+            addMessage(t('messages.doorRepairComplete'))
           }
         }
       }
@@ -3305,14 +3736,18 @@ onMounted(() => {
   
   window.addEventListener('mouseup', handleMouseUp)
   window.addEventListener('mousemove', handleMouseMove)
+  window.addEventListener('keydown', handleKeyDown)
+  window.addEventListener('keyup', handleKeyUp)
 })
 
 onUnmounted(() => {
   if (animationId) cancelAnimationFrame(animationId)
   stopBgm()
-  stopMove() // Clean up touch movement interval
+  stopMove() // Clean up movement state
   window.removeEventListener('mouseup', handleMouseUp)
   window.removeEventListener('mousemove', handleMouseMove)
+  window.removeEventListener('keydown', handleKeyDown)
+  window.removeEventListener('keyup', handleKeyUp)
   window.removeEventListener('resize', updateViewportSize)
 })
 </script>
@@ -3321,12 +3756,12 @@ onUnmounted(() => {
   <div class="relative flex h-screen flex-col bg-neutral-950 text-white overflow-hidden">
     <!-- Top Bar - Semi-transparent for mobile -->
     <div class="flex items-center justify-between border-b border-neutral-800/50 bg-neutral-900/70 backdrop-blur-sm px-3 py-1.5 z-20">
-      <button class="text-neutral-400 hover:text-white transition text-sm px-2 py-1" @click="backToHome">← Back</button>
+      <button class="text-neutral-400 hover:text-white transition text-sm px-2 py-1" @click="backToHome">{{ t('ui.back') }}</button>
       
       <div class="flex items-center gap-2">
         <div class="rounded-lg bg-neutral-800/60 px-3 py-1 text-xs">
-          <span v-if="!monsterActive" class="font-bold text-amber-400">🐉 Spawns in {{ Math.ceil(countdown) }}s</span>
-          <span v-else class="font-bold text-red-400">🐉 Monster Active!</span>
+          <span v-if="!monsterActive" class="font-bold text-amber-400">{{ t('ui.spawnsIn', { time: Math.ceil(countdown) }) }}</span>
+          <span v-else class="font-bold text-red-400">{{ t('ui.monsterActive') }}</span>
         </div>
         <div class="rounded-lg bg-red-900/40 px-3 py-1 text-xs">
           👹 <span class="font-bold text-red-400">LV{{ monster.level }} {{ Math.floor(monster.hp) }}/{{ monster.maxHp }}</span>
@@ -3369,30 +3804,38 @@ onUnmounted(() => {
             <div></div>
             <button 
               class="w-12 h-12 bg-white/20 hover:bg-white/30 active:bg-amber-500/70 rounded-xl flex items-center justify-center text-2xl font-bold touch-manipulation select-none transition-colors"
-              @click="moveDirection('up')"
+              @mousedown.prevent="startMove('up')"
+              @mouseup.prevent="stopMoveDir('up')"
+              @mouseleave="stopMoveDir('up')"
               @touchstart.prevent="startMove('up')"
-              @touchend.prevent="stopMove"
+              @touchend.prevent="stopMoveDir('up')"
             >↑</button>
             <div></div>
             <button 
               class="w-12 h-12 bg-white/20 hover:bg-white/30 active:bg-amber-500/70 rounded-xl flex items-center justify-center text-2xl font-bold touch-manipulation select-none transition-colors"
-              @click="moveDirection('left')"
+              @mousedown.prevent="startMove('left')"
+              @mouseup.prevent="stopMoveDir('left')"
+              @mouseleave="stopMoveDir('left')"
               @touchstart.prevent="startMove('left')"
-              @touchend.prevent="stopMove"
+              @touchend.prevent="stopMoveDir('left')"
             >←</button>
             <div class="w-12 h-12 bg-white/10 rounded-xl flex items-center justify-center text-lg text-white/50">🎮</div>
             <button 
               class="w-12 h-12 bg-white/20 hover:bg-white/30 active:bg-amber-500/70 rounded-xl flex items-center justify-center text-2xl font-bold touch-manipulation select-none transition-colors"
-              @click="moveDirection('right')"
+              @mousedown.prevent="startMove('right')"
+              @mouseup.prevent="stopMoveDir('right')"
+              @mouseleave="stopMoveDir('right')"
               @touchstart.prevent="startMove('right')"
-              @touchend.prevent="stopMove"
+              @touchend.prevent="stopMoveDir('right')"
             >→</button>
             <div></div>
             <button 
               class="w-12 h-12 bg-white/20 hover:bg-white/30 active:bg-amber-500/70 rounded-xl flex items-center justify-center text-2xl font-bold touch-manipulation select-none transition-colors"
-              @click="moveDirection('down')"
+              @mousedown.prevent="startMove('down')"
+              @mouseup.prevent="stopMoveDir('down')"
+              @mouseleave="stopMoveDir('down')"
               @touchstart.prevent="startMove('down')"
-              @touchend.prevent="stopMove"
+              @touchend.prevent="stopMoveDir('down')"
             >↓</button>
             <div></div>
           </div>
@@ -3408,15 +3851,15 @@ onUnmounted(() => {
             class="px-4 py-3 bg-blue-600/80 hover:bg-blue-500/80 backdrop-blur-sm rounded-xl text-sm font-bold shadow-lg border border-blue-400/30"
             @click="goToSleep"
           >
-            🛏️ {{ !monsterActive && currentNearRoom?.ownerId === null ? 'Claim & Sleep!' : 'Sleep' }}
+            🛏️ {{ !monsterActive && currentNearRoom?.ownerId === null ? t('ui.claimAndSleep') : t('ui.sleep') }}
           </button>
         </Transition>
         
         <!-- Sleep status (when sleeping) - permanent, no wake button -->
         <div v-if="humanPlayer?.isSleeping && gamePhase === 'playing'" class="rounded-xl border border-blue-500/30 bg-blue-950/70 backdrop-blur-sm p-3">
-          <p class="text-blue-300 text-sm mb-2">💤 Sleeping Permanently</p>
-          <p class="text-blue-200/60 text-xs mb-1">💡 Click on door/bed to upgrade!</p>
-          <p class="text-amber-300/60 text-xs">⚔️ Your defenses will protect you</p>
+          <p class="text-blue-300 text-sm mb-2">{{ t('ui.sleepingPermanently') }}</p>
+          <p class="text-blue-200/60 text-xs mb-1">{{ t('ui.sleepTipUpgrade') }}</p>
+          <p class="text-amber-300/60 text-xs">{{ t('ui.sleepTipDefense') }}</p>
         </div>
         
         <!-- Camera reset button -->
@@ -3425,13 +3868,55 @@ onUnmounted(() => {
           class="px-3 py-2 bg-white/10 hover:bg-white/20 backdrop-blur-sm rounded-lg text-xs font-medium border border-white/10"
           @click="resetCameraToPlayer"
         >
-          🎯 Follow Player
+          {{ t('ui.followPlayer') }}
         </button>
       </div>
 
-      <!-- Right Side: Message Log - More transparent -->
-      <div class="absolute bottom-4 right-3 w-64 max-h-32 overflow-y-auto rounded-xl border border-white/10 bg-black/40 backdrop-blur-sm p-2 text-xs z-10">
-        <div v-for="(msg, i) in messageLog.slice(0, 6)" :key="i" class="text-white/60 mb-1 text-[10px]">{{ msg }}</div>
+      <!-- TOP-LEFT: Player & Monster Status Panel -->
+      <div class="absolute top-3 left-3 flex flex-col gap-1.5 z-10">
+        <!-- Monster Avatar (clickable) -->
+        <button 
+          v-if="monsterActive"
+          class="flex items-center gap-2 px-2 py-1.5 rounded-lg backdrop-blur-sm border transition-all hover:scale-105"
+          :class="monster.hp > 0 ? 'bg-red-900/60 border-red-500/50 hover:bg-red-800/70' : 'bg-neutral-800/60 border-neutral-600/50'"
+          @click="navigateToMonster"
+        >
+          <div class="w-8 h-8 rounded-full flex items-center justify-center text-lg" :class="monster.hp > 0 ? 'bg-red-600' : 'bg-neutral-600'">
+            👹
+          </div>
+          <div class="text-left">
+            <div class="text-xs font-bold" :class="monster.hp > 0 ? 'text-red-300' : 'text-neutral-400'">{{ t('terms.monster') }}</div>
+            <div class="text-[10px]" :class="monster.hp > 0 ? 'text-red-400/80' : 'text-neutral-500'">LV{{ monster.level }}</div>
+          </div>
+        </button>
+        
+        <!-- Player Avatars (clickable) -->
+        <button 
+          v-for="player in players" 
+          :key="player.id"
+          class="flex items-center gap-2 px-2 py-1.5 rounded-lg backdrop-blur-sm border transition-all hover:scale-105"
+          :class="[
+            player.alive 
+              ? 'bg-green-900/60 border-green-500/50 hover:bg-green-800/70' 
+              : 'bg-red-900/60 border-red-500/50',
+            player.isHuman ? 'ring-2 ring-amber-400/50' : ''
+          ]"
+          @click="navigateToPlayer(player)"
+        >
+          <div 
+            class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold border-2"
+            :class="player.alive ? 'border-green-400' : 'border-red-400'"
+            :style="{ backgroundColor: player.color + 'cc' }"
+          >
+            {{ player.isHuman ? '👤' : '🤖' }}
+          </div>
+          <div class="text-left">
+            <div class="text-xs font-bold" :class="player.alive ? 'text-green-300' : 'text-red-300'">{{ player.name }}</div>
+            <div class="text-[10px]" :class="player.alive ? 'text-green-400/80' : 'text-red-400/80'">
+              {{ player.alive ? (player.isSleeping ? t('ui.sleeping') : t('ui.active')) : t('ui.dead') }}
+            </div>
+          </div>
+        </button>
       </div>
     </div>
 
@@ -3443,60 +3928,77 @@ onUnmounted(() => {
           
           <!-- Door Upgrade -->
           <template v-if="upgradeTarget.type === 'door' && upgradeTarget.room">
-            <h2 class="mb-3 text-center font-bold text-lg text-blue-400">🚪 Door</h2>
+            <h2 class="mb-3 text-center font-bold text-lg" :class="upgradeTarget.room.doorHp <= 0 ? 'text-red-400' : 'text-blue-400'">
+              {{ upgradeTarget.room.doorHp <= 0 ? t('ui.doorDestroyed') : t('ui.door') }}
+            </h2>
             <div class="text-center mb-4">
-              <div class="text-2xl font-bold">Level {{ upgradeTarget.room.doorLevel }}</div>
+              <div class="text-2xl font-bold">{{ t('terms.level') }} {{ upgradeTarget.room.doorLevel }}</div>
               <div class="text-sm text-neutral-400">HP: {{ Math.floor(upgradeTarget.room.doorHp) }}/{{ upgradeTarget.room.doorMaxHp }}</div>
               <div v-if="upgradeTarget.room.doorIsRepairing" class="text-xs text-green-400 mt-1">
                 🔧 Repairing... {{ Math.floor((upgradeTarget.room.doorRepairTimer / GAME_CONSTANTS.DOOR_REPAIR_DURATION) * 100) }}%
               </div>
             </div>
             <div class="flex flex-col gap-2">
-              <!-- Upgrade button -->
-              <button 
-                v-if="upgradeTarget.room.doorLevel < 10"
-                class="rounded-xl bg-blue-600 hover:bg-blue-500 py-3 font-bold text-white transition"
-                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < upgradeTarget.room.doorUpgradeCost }"
-                :disabled="(humanPlayer?.gold || 0) < upgradeTarget.room.doorUpgradeCost"
-                @click="upgradeDoor">
-                ⬆️ Upgrade ({{ upgradeTarget.room.doorUpgradeCost }}g) → +50% HP
-              </button>
-              <div v-else class="text-center text-green-400 py-2">✅ Max Level!</div>
+              <!-- REBUILD button when door is destroyed -->
+              <template v-if="upgradeTarget.room.doorHp <= 0">
+                <div class="text-center text-red-400 text-sm mb-2">{{ t('ui.doorDestroyedDesc') }}</div>
+                <button 
+                  class="rounded-xl bg-amber-600 hover:bg-amber-500 py-3 font-bold text-white transition"
+                  :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < 100 }"
+                  :disabled="(humanPlayer?.gold || 0) < 100"
+                  @click="rebuildDoor">
+                  {{ t('ui.rebuildDoor', { cost: 100 }) }}
+                </button>
+              </template>
               
-              <!-- Repair button (circular indicator) -->
-              <button 
-                class="rounded-xl bg-green-600 hover:bg-green-500 py-3 font-bold text-white transition relative overflow-hidden"
-                :class="{ 
-                  'opacity-50 cursor-not-allowed': upgradeTarget.room.doorRepairCooldown > 0 || upgradeTarget.room.doorIsRepairing || upgradeTarget.room.doorHp >= upgradeTarget.room.doorMaxHp 
-                }"
-                :disabled="upgradeTarget.room.doorRepairCooldown > 0 || upgradeTarget.room.doorIsRepairing || upgradeTarget.room.doorHp >= upgradeTarget.room.doorMaxHp"
-                @click="startDoorRepair">
-                <span v-if="upgradeTarget.room.doorRepairCooldown > 0">
-                  🔧 Cooldown: {{ Math.ceil(upgradeTarget.room.doorRepairCooldown) }}s
-                </span>
-                <span v-else-if="upgradeTarget.room.doorIsRepairing">
-                  🔧 Repairing...
-                </span>
-                <span v-else-if="upgradeTarget.room.doorHp >= upgradeTarget.room.doorMaxHp">
-                  ✅ Full HP
-                </span>
-                <span v-else>
-                  🔧 Repair (+20% HP over 7s)
-                </span>
-              </button>
+              <!-- Normal upgrade/repair when door exists -->
+              <template v-else>
+                <!-- Upgrade button -->
+                <button 
+                  v-if="upgradeTarget.room.doorLevel < 10"
+                  class="rounded-xl bg-blue-600 hover:bg-blue-500 py-3 font-bold text-white transition"
+                  :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < upgradeTarget.room.doorUpgradeCost }"
+                  :disabled="(humanPlayer?.gold || 0) < upgradeTarget.room.doorUpgradeCost"
+                  @click="upgradeDoor">
+                  {{ t('ui.upgradeDoor', { cost: upgradeTarget.room.doorUpgradeCost }) }}
+                </button>
+                <div v-else class="text-center text-green-400 py-2">{{ t('ui.maxLevel') }}</div>
+                
+                <!-- Repair button (circular indicator) -->
+                <button 
+                  class="rounded-xl bg-green-600 hover:bg-green-500 py-3 font-bold text-white transition relative overflow-hidden"
+                  :class="{ 
+                    'opacity-50 cursor-not-allowed': upgradeTarget.room.doorRepairCooldown > 0 || upgradeTarget.room.doorIsRepairing || upgradeTarget.room.doorHp >= upgradeTarget.room.doorMaxHp 
+                  }"
+                  :disabled="upgradeTarget.room.doorRepairCooldown > 0 || upgradeTarget.room.doorIsRepairing || upgradeTarget.room.doorHp >= upgradeTarget.room.doorMaxHp"
+                  @click="startDoorRepair">
+                  <span v-if="upgradeTarget.room.doorRepairCooldown > 0">
+                    {{ t('ui.repairCooldown', { time: Math.ceil(upgradeTarget.room.doorRepairCooldown) }) }}
+                  </span>
+                  <span v-else-if="upgradeTarget.room.doorIsRepairing">
+                    {{ t('ui.repairing') }}
+                  </span>
+                  <span v-else-if="upgradeTarget.room.doorHp >= upgradeTarget.room.doorMaxHp">
+                    {{ t('ui.fullHp') }}
+                  </span>
+                  <span v-else>
+                    {{ t('ui.repairDoor') }}
+                  </span>
+                </button>
+              </template>
               
               <button class="rounded-xl border border-neutral-600 py-2 text-sm text-neutral-300 hover:bg-white/10 transition" @click="closeUpgradeModal">
-                Cancel
+                {{ t('ui.cancel') }}
               </button>
             </div>
           </template>
           
           <!-- Bed Upgrade -->
           <template v-else-if="upgradeTarget.type === 'bed' && upgradeTarget.room">
-            <h2 class="mb-3 text-center font-bold text-lg text-amber-400">🛏️ Bed</h2>
+            <h2 class="mb-3 text-center font-bold text-lg text-amber-400">{{ t('ui.bed') }}</h2>
             <div class="text-center mb-4">
-              <div class="text-2xl font-bold">Level {{ upgradeTarget.room.bedLevel }}</div>
-              <div class="text-sm text-neutral-400">Gold/sec: {{ upgradeTarget.room.bedIncome }}</div>
+              <div class="text-2xl font-bold">{{ t('terms.level') }} {{ upgradeTarget.room.bedLevel }}</div>
+              <div class="text-sm text-neutral-400">{{ t('ui.goldPerSec', { rate: upgradeTarget.room.bedIncome }) }}</div>
             </div>
             <div class="flex flex-col gap-2">
               <button 
@@ -3504,10 +4006,10 @@ onUnmounted(() => {
                 :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < upgradeTarget.room.bedUpgradeCost }"
                 :disabled="(humanPlayer?.gold || 0) < upgradeTarget.room.bedUpgradeCost"
                 @click="upgradeBed">
-                ⬆️ Upgrade ({{ upgradeTarget.room.bedUpgradeCost }}g) → {{ upgradeTarget.room.bedIncome * 2 }}g/s
+                {{ t('ui.upgradeBed', { cost: upgradeTarget.room.bedUpgradeCost, income: upgradeTarget.room.bedIncome * 2 }) }}
               </button>
               <button class="rounded-xl border border-neutral-600 py-2 text-sm text-neutral-300 hover:bg-white/10 transition" @click="closeUpgradeModal">
-                Cancel
+                {{ t('ui.cancel') }}
               </button>
             </div>
           </template>
@@ -3520,11 +4022,10 @@ onUnmounted(() => {
               'text-violet-400': upgradeTarget.building.type === 'soul_collector',
               'text-indigo-400': upgradeTarget.building.type === 'vanguard'
             }">
-              {{ upgradeTarget.building.type === 'turret' ? '🔫' : upgradeTarget.building.type === 'atm' ? '🏧' : upgradeTarget.building.type === 'vanguard' ? '⚔️' : '👻' }} 
-              {{ upgradeTarget.building.type === 'soul_collector' ? 'Soul Collector' : upgradeTarget.building.type === 'atm' ? 'ATM' : upgradeTarget.building.type === 'vanguard' ? 'Vanguard' : 'Turret' }}
+              {{ upgradeTarget.building.type === 'turret' ? t('ui.turretTitle') : upgradeTarget.building.type === 'atm' ? t('ui.atmTitle') : upgradeTarget.building.type === 'vanguard' ? t('ui.vanguardTitle') : t('ui.soulCollectorTitle') }}
             </h2>
             <div class="text-center mb-4">
-              <div class="text-2xl font-bold">Level {{ upgradeTarget.building.level }}/10</div>
+              <div class="text-2xl font-bold">{{ t('terms.level') }} {{ upgradeTarget.building.level }}/10</div>
               <div class="text-sm text-neutral-400">
                 <span v-if="upgradeTarget.building.damage > 0">DMG: {{ Math.floor(upgradeTarget.building.damage) }}</span>
                 <span v-if="upgradeTarget.building.range > 0" class="ml-2">Range: {{ Math.floor(upgradeTarget.building.range) }}</span>
@@ -3541,16 +4042,16 @@ onUnmounted(() => {
                 :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < upgradeTarget.building.upgradeCost || (upgradeTarget.building.level >= 4 && (humanPlayer?.souls || 0) < GAME_CONSTANTS.SOUL_UPGRADE_COST * (upgradeTarget.building.level - 3)) }"
                 :disabled="(humanPlayer?.gold || 0) < upgradeTarget.building.upgradeCost || (upgradeTarget.building.level >= 4 && (humanPlayer?.souls || 0) < GAME_CONSTANTS.SOUL_UPGRADE_COST * (upgradeTarget.building.level - 3))"
                 @click="upgradeBuilding">
-                ⬆️ Upgrade ({{ upgradeTarget.building.upgradeCost }}g<span v-if="upgradeTarget.building.level >= 4"> + {{ GAME_CONSTANTS.SOUL_UPGRADE_COST * (upgradeTarget.building.level - 3) }}👻</span>)
+                {{ t('ui.upgradeBuilding', { cost: upgradeTarget.building.upgradeCost }) }}<span v-if="upgradeTarget.building.level >= 4">{{ t('ui.upgradeBuildingSouls', { souls: GAME_CONSTANTS.SOUL_UPGRADE_COST * (upgradeTarget.building.level - 3) }) }}</span><span v-else>)</span>
               </button>
-              <div v-else class="text-center text-green-400 py-2">✅ Max Level!</div>
+              <div v-else class="text-center text-green-400 py-2">{{ t('ui.maxLevel') }}</div>
               <button 
                 class="rounded-xl bg-red-600/80 hover:bg-red-500 py-2 font-medium text-white transition"
                 @click="sellBuilding">
-                💰 Sell ({{ Math.floor(upgradeTarget.building.upgradeCost * 0.4) }}g)
+                {{ t('ui.sellBuilding', { refund: Math.floor(upgradeTarget.building.upgradeCost * 0.4) }) }}
               </button>
               <button class="rounded-xl border border-neutral-600 py-2 text-sm text-neutral-300 hover:bg-white/10 transition" @click="closeUpgradeModal">
-                Cancel
+                {{ t('ui.cancel') }}
               </button>
             </div>
           </template>
@@ -3563,7 +4064,7 @@ onUnmounted(() => {
       <div v-if="showBuildPopup" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" @click.self="showBuildPopup = false">
         <div class="relative w-full max-w-md rounded-2xl border border-white/20 bg-neutral-900/95 backdrop-blur-md p-5 shadow-2xl">
           <button class="absolute right-3 top-3 text-xl text-neutral-500 hover:text-white" @click="showBuildPopup = false">✕</button>
-          <h2 class="mb-3 text-center font-bold text-lg text-amber-400">🏗️ Build Defense</h2>
+          <h2 class="mb-3 text-center font-bold text-lg text-amber-400">{{ t('ui.buildDefense') }}</h2>
           <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <!-- Turret -->
             <button
@@ -3572,7 +4073,7 @@ onUnmounted(() => {
               :disabled="(humanPlayer?.gold || 0) < GAME_CONSTANTS.COSTS.turret"
               @click="buildDefense('turret')">
               <div class="text-2xl mb-1">🔫</div>
-              <div class="font-bold text-sm">Turret</div>
+              <div class="font-bold text-sm">{{ t('ui.turret') }}</div>
               <div class="text-xs text-amber-400">{{ GAME_CONSTANTS.COSTS.turret }}g</div>
             </button>
             <!-- ATM -->
@@ -3582,7 +4083,7 @@ onUnmounted(() => {
               :disabled="(humanPlayer?.souls || 0) < GAME_CONSTANTS.COSTS.atm"
               @click="buildDefense('atm')">
               <div class="text-2xl mb-1">🏧</div>
-              <div class="font-bold text-sm">ATM</div>
+              <div class="font-bold text-sm">{{ t('ui.atm') }}</div>
               <div class="text-xs text-purple-400">{{ GAME_CONSTANTS.COSTS.atm }}👻</div>
             </button>
             <!-- Soul Collector -->
@@ -3592,7 +4093,7 @@ onUnmounted(() => {
               :disabled="(humanPlayer?.gold || 0) < GAME_CONSTANTS.COSTS.soulCollector"
               @click="buildDefense('soul_collector')">
               <div class="text-2xl mb-1">👻</div>
-              <div class="font-bold text-sm">Soul</div>
+              <div class="font-bold text-sm">{{ t('ui.soul') }}</div>
               <div class="text-xs text-amber-400">{{ GAME_CONSTANTS.COSTS.soulCollector }}g</div>
             </button>
             <!-- Vanguard -->
@@ -3602,11 +4103,11 @@ onUnmounted(() => {
               :disabled="(humanPlayer?.gold || 0) < GAME_CONSTANTS.VANGUARD.GOLD_COST"
               @click="buildDefense('vanguard')">
               <div class="text-2xl mb-1">⚔️</div>
-              <div class="font-bold text-sm">Vanguard</div>
+              <div class="font-bold text-sm">{{ t('ui.vanguard') }}</div>
               <div class="text-xs text-amber-400">{{ GAME_CONSTANTS.VANGUARD.GOLD_COST }}g</div>
             </button>
           </div>
-          <p class="text-xs text-neutral-500 mt-3 text-center">Vanguard: Auto-attack monsters! 1 unit base, +1 every 2 levels</p>
+          <p class="text-xs text-neutral-500 mt-3 text-center">{{ t('ui.vanguardDesc') }}</p>
         </div>
       </div>
     </Transition>
@@ -3618,17 +4119,17 @@ onUnmounted(() => {
           :class="victory ? 'border-amber-500 bg-linear-to-b from-amber-950/90 to-neutral-900/90' : 'border-red-500 bg-linear-to-b from-red-950/90 to-neutral-900/90'">
           <div class="text-6xl mb-3">{{ victory ? '🏆' : '💀' }}</div>
           <h2 class="text-3xl font-bold" :class="victory ? 'text-amber-400' : 'text-red-400'">
-            {{ victory ? 'Victory!' : 'Defeat!' }}
+            {{ victory ? t('ui.victory') : t('ui.defeat') }}
           </h2>
           <p class="mt-2 text-neutral-400 text-sm">
-            {{ victory ? 'Monster defeated!' : 'You were killed!' }}
+            {{ victory ? t('ui.monsterDefeated') : t('ui.youWereKilled') }}
           </p>
           <div class="mt-6 flex flex-col gap-2">
             <button class="rounded-xl bg-linear-to-r from-amber-600 to-amber-500 py-2.5 font-bold text-white" @click="restartGame">
-              🔄 Play Again
+              {{ t('ui.playAgain') }}
             </button>
             <button class="rounded-xl border border-neutral-600 py-2 text-sm text-neutral-300" @click="backToHome">
-              🏠 Home
+              {{ t('ui.home') }}
             </button>
           </div>
         </div>
