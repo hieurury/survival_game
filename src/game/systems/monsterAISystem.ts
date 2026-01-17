@@ -203,11 +203,29 @@ export function isAtHealZone(monster: Monster): boolean {
   return false
 }
 
-export function healMonster(monster: Monster, deltaTime: number): void {
-  const healAmount = monster.maxHp * GAME_CONSTANTS.MONSTER_HEAL_RATE * deltaTime
-  monster.hp = Math.min(monster.hp + healAmount, monster.maxHp)
+/**
+ * Heal monster and consume mana from healing point
+ * @param monster The monster to heal
+ * @param deltaTime Time since last update
+ * @param availableMana The mana available at the current healing point
+ * @returns The amount of mana consumed (equals HP restored)
+ */
+export function healMonsterWithMana(
+  monster: Monster, 
+  deltaTime: number, 
+  availableMana: number
+): number {
+  const potentialHeal = monster.maxHp * GAME_CONSTANTS.MONSTER_HEAL_RATE * deltaTime
+  const hpNeeded = monster.maxHp - monster.hp
+  const healAmount = Math.min(potentialHeal, hpNeeded, availableMana)
+  
+  monster.hp += healAmount
+  return healAmount // Mana consumed equals HP restored
 }
 
+/**
+ * @deprecated Use findNearestHealingPointWithMana instead for mana-based healing
+ */
 export function getClosestHealZone(monster: Monster): Vector2 | null {
   if (monster.healZones.length === 0) return null
   
@@ -225,4 +243,16 @@ export function getClosestHealZone(monster: Monster): Vector2 | null {
   }
   
   return closest
+}
+
+/**
+ * Check if a healing point has sufficient mana for healing
+ * Requires at least 10% of max mana capacity
+ */
+export function hasEnoughManaForHealing(
+  currentMana: number, 
+  maxMana: number
+): boolean {
+  const minManaPercent = GAME_CONSTANTS.MONSTER_HEAL_THRESHOLD // 10%
+  return currentMana >= maxMana * minManaPercent
 }

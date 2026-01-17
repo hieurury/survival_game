@@ -20,14 +20,18 @@ export const MAP_CONFIG = {
     height: 6,
   },
   
+  // Reduced to 2 healing points (opposite corners)
   MONSTER_NESTS: [
-    { gridX: 0, gridY: 0, width: 4, height: 4 },
-    { gridX: 46, gridY: 0, width: 4, height: 4 },
-    { gridX: 0, gridY: 26, width: 4, height: 4 },
-    { gridX: 46, gridY: 26, width: 4, height: 4 },
+    { gridX: 0, gridY: 0, width: 4, height: 4 },       // Top-left
+    { gridX: 46, gridY: 26, width: 4, height: 4 },     // Bottom-right
   ],
   
   ROOMS_COUNT: 7,
+  
+  // Healing Point Mana System
+  HEALING_POINT_MAX_MANA: 5000,
+  HEALING_POINT_MANA_REGEN: 50, // mana per second
+  HEALING_POINT_MIN_MANA_PERCENT: 0.10, // 10% minimum to allow healing
 } as const
 
 // =============================================================================
@@ -229,6 +233,11 @@ export const GAME_CONSTANTS = {
   MONSTER_BASE_LEVEL_TIME: MONSTER_CONFIG.BASE_LEVEL_TIME,
   MONSTER_LEVEL_TIME_INCREMENT: MONSTER_CONFIG.LEVEL_TIME_INCREMENT,
   MONSTER_TARGET_TIMEOUT: MONSTER_CONFIG.TARGET_TIMEOUT,
+  
+  // Healing Point Mana System
+  HEALING_POINT_MAX_MANA: MAP_CONFIG.HEALING_POINT_MAX_MANA,
+  HEALING_POINT_MANA_REGEN: MAP_CONFIG.HEALING_POINT_MANA_REGEN,
+  HEALING_POINT_MIN_MANA_PERCENT: MAP_CONFIG.HEALING_POINT_MIN_MANA_PERCENT,
   
   // Room & Door
   BASE_DOOR_HP: ROOM_CONFIG.BASE_DOOR_HP,

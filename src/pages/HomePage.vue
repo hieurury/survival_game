@@ -2,17 +2,29 @@
 import { ref } from 'vue'
 import { playSfx } from '../composables/useAudio'
 import { ASSET_SOURCES } from '../composables/useAssets'
+import { useGameState } from '../composables/useGameState'
+import type { DifficultyLevel } from '../game/config/difficulty'
 
 const emit = defineEmits<{
   (e: 'start-game'): void
 }>()
 
+const { selectedDifficulty, setDifficulty, availableDifficulties } = useGameState()
+
 const showSettings = ref(false)
 const showAssetGuide = ref(false)
 const showHowToPlay = ref(false)
+const showDifficultySelect = ref(false)
 
 const handleStart = () => {
   playSfx('click')
+  showDifficultySelect.value = true
+}
+
+const selectDifficultyAndStart = (level: DifficultyLevel) => {
+  setDifficulty(level)
+  playSfx('click')
+  showDifficultySelect.value = false
   emit('start-game')
 }
 
@@ -20,6 +32,7 @@ const closeAllPopups = () => {
   showSettings.value = false
   showAssetGuide.value = false
   showHowToPlay.value = false
+  showDifficultySelect.value = false
 }
 
 const openSettings = () => {
@@ -156,6 +169,56 @@ const openHowToPlay = () => {
               </div>
               <input type="range" min="0" max="100" value="70" class="h-2 w-full cursor-pointer appearance-none rounded-full bg-neutral-700 accent-red-500" disabled />
             </div>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- POPUP: Difficulty Selection -->
+    <Transition name="popup">
+      <div v-if="showDifficultySelect" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" @click.self="closeAllPopups">
+        <div class="relative w-full max-w-lg rounded-2xl border border-neutral-700 bg-neutral-900 p-6 shadow-2xl">
+          <button class="absolute right-4 top-4 text-2xl text-neutral-500 hover:text-white" @click="closeAllPopups">✕</button>
+          
+          <h2 class="mb-2 text-center font-serif text-2xl font-bold text-red-500">Chọn độ khó</h2>
+          <p class="mb-6 text-center text-sm text-neutral-400">Độ khó ảnh hưởng đến tài nguyên, số lượng quái và kích thước bản đồ</p>
+          
+          <div class="space-y-3">
+            <button
+              v-for="diff in availableDifficulties"
+              :key="diff.id"
+              class="group relative w-full overflow-hidden rounded-xl border-2 p-4 text-left transition-all"
+              :class="{
+                'border-green-600/50 bg-green-950/30 hover:border-green-500 hover:bg-green-900/40': diff.id === 'easy',
+                'border-amber-600/50 bg-amber-950/30 hover:border-amber-500 hover:bg-amber-900/40': diff.id === 'normal',
+                'border-red-600/50 bg-red-950/30 hover:border-red-500 hover:bg-red-900/40': diff.id === 'hard',
+              }"
+              @click="selectDifficultyAndStart(diff.id)"
+            >
+              <div class="flex items-center justify-between">
+                <div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-xl">
+                      {{ diff.id === 'easy' ? '🌱' : diff.id === 'normal' ? '⚔️' : '💀' }}
+                    </span>
+                    <span class="text-lg font-bold" :class="{
+                      'text-green-400': diff.id === 'easy',
+                      'text-amber-400': diff.id === 'normal',
+                      'text-red-400': diff.id === 'hard',
+                    }">{{ diff.name }}</span>
+                  </div>
+                  <p class="mt-1 text-sm text-neutral-400">{{ diff.description }}</p>
+                </div>
+                <div class="text-right text-xs text-neutral-500">
+                  <div>{{ diff.player.totalCount }} người chơi</div>
+                  <div>{{ diff.monster.count }} quái vật</div>
+                  <div>{{ diff.player.startingGold }}💰 khởi đầu</div>
+                </div>
+              </div>
+              
+              <!-- Hover effect -->
+              <div class="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/5 to-transparent transition-transform group-hover:translate-x-full"></div>
+            </button>
           </div>
         </div>
       </div>

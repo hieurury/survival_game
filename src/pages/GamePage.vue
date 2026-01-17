@@ -4,12 +4,29 @@ import { initAudio, playSfx, startBgm, stopBgm } from '../composables/useAudio'
 import { findPath, distance, moveTowards, gridToWorld } from '../composables/usePathfinding'
 import BotAI from '../composables/useBotAI'
 import { t, getBuildingTypeName, getRoomTypeName } from '../composables/useLocale'
+import { useGameState } from '../composables/useGameState'
 import type { 
   Room, Player, Monster, GamePhase, GridCell, 
   DefenseBuilding, Particle, Projectile, Vector2,
-  FloatingText, VanguardUnit
+  FloatingText, VanguardUnit, HealingPoint
 } from '../types/game'
 import { GAME_CONSTANTS } from '../types/game'
+
+// Get difficulty configuration
+const { 
+  currentConfig,
+  mapConfig, 
+  monsterConfig, 
+  playerConfig, 
+  economyConfig, 
+  healingPointConfig,
+  timingConfig,
+  healingPointNests,
+  spawnZone,
+  worldWidth,
+  worldHeight,
+  difficultyName
+} = useGameState()
 
 const emit = defineEmits<{
   (e: 'back-home'): void
@@ -37,7 +54,7 @@ const updateViewportSize = () => {
 
 // Game state - game starts immediately, countdown is for monster spawn
 const gamePhase = ref<GamePhase>('playing')
-const countdown = ref(GAME_CONSTANTS.COUNTDOWN_TIME)
+const countdown = ref(timingConfig.value.countdownTime)
 const monsterActive = ref(false) // Monster starts hunting after countdown
 const gameOver = ref(false)
 const victory = ref(false)
@@ -66,38 +83,39 @@ const grid = reactive<GridCell[][]>([])
 
 // Helper: check if position is in central spawn zone (no building allowed)
 const isInSpawnZone = (gridX: number, gridY: number): boolean => {
-  const sz = GAME_CONSTANTS.SPAWN_ZONE
+  const sz = spawnZone.value
   return gridX >= sz.gridX && gridX < sz.gridX + sz.width &&
          gridY >= sz.gridY && gridY < sz.gridY + sz.height
 }
 
-// Initialize grid - create a fully walkable map with corridors (40x24 grid)
-// NO BLACK/EMPTY IMPASSABLE TILES - everything is accessible
+// Initialize grid - create a fully walkable map with corridors
+// Uses difficulty-based map size
 const initGrid = () => {
   grid.length = 0
+  const config = mapConfig.value
   
-  // First pass: create all corridor cells (WALKABLE by default - no black tiles!)
-  for (let y = 0; y < GAME_CONSTANTS.GRID_ROWS; y++) {
+  // First pass: create all corridor cells (WALKABLE by default)
+  for (let y = 0; y < config.gridRows; y++) {
     const row: GridCell[] = []
-    for (let x = 0; x < GAME_CONSTANTS.GRID_COLS; x++) {
+    for (let x = 0; x < config.gridCols; x++) {
       row.push({ x, y, type: 'corridor', walkable: true })
     }
     grid.push(row)
   }
   
   // Mark central spawn zone (no building allowed, but walkable)
-  const sz = GAME_CONSTANTS.SPAWN_ZONE
+  const sz = spawnZone.value
   for (let y = sz.gridY; y < sz.gridY + sz.height; y++) {
     for (let x = sz.gridX; x < sz.gridX + sz.width; x++) {
       const row = grid[y]
       if (row && row[x]) {
-        row[x] = { x, y, type: 'corridor', walkable: true } // Safe zone, just corridor
+        row[x] = { x, y, type: 'corridor', walkable: true }
       }
     }
   }
   
-  // Mark monster nest zones at 4 corners (heal zones)
-  for (const nest of GAME_CONSTANTS.MONSTER_NESTS) {
+  // Mark monster nest zones (heal zones) based on difficulty
+  for (const nest of healingPointNests.value) {
     for (let y = nest.gridY; y < nest.gridY + nest.height; y++) {
       for (let x = nest.gridX; x < nest.gridX + nest.width; x++) {
         const row = grid[y]
@@ -115,15 +133,18 @@ const rooms = reactive<Room[]>([])
 // Generate random non-overlapping rooms
 const initRooms = () => {
   rooms.length = 0
-  const cellSize = GAME_CONSTANTS.CELL_SIZE
-  const numRooms = GAME_CONSTANTS.ROOMS_COUNT // 7 rooms
+  const config = mapConfig.value
+  const cellSize = config.cellSize
+  const numRooms = config.roomCount
   
   // Keep track of placed rooms to avoid overlap
   const placedRooms: { gridX: number; gridY: number; width: number; height: number }[] = []
   
-  // Room size ranges - LARGER rooms (8-10 cells) for more build space
-  const minWidth = 8, maxWidth = 10
-  const minHeight = 8, maxHeight = 10
+  // Room size ranges from difficulty config
+  const minWidth = config.roomMinWidth
+  const maxWidth = config.roomMaxWidth
+  const minHeight = config.roomMinHeight
+  const maxHeight = config.roomMaxHeight
   
   // Room types
   const roomTypes: ('normal' | 'armory' | 'storage' | 'bunker')[] = ['normal', 'armory', 'storage', 'bunker']
@@ -131,7 +152,7 @@ const initRooms = () => {
   
   // Helper: check if area overlaps with spawn zone
   const overlapsSpawnZone = (gx: number, gy: number, w: number, h: number): boolean => {
-    const sz = GAME_CONSTANTS.SPAWN_ZONE
+    const sz = spawnZone.value
     const padding = 1
     return gx < sz.gridX + sz.width + padding &&
            gx + w + padding > sz.gridX &&
@@ -142,7 +163,7 @@ const initRooms = () => {
   // Helper: check if area overlaps with monster nests
   const overlapsMonsterNest = (gx: number, gy: number, w: number, h: number): boolean => {
     const padding = 1
-    for (const nest of GAME_CONSTANTS.MONSTER_NESTS) {
+    for (const nest of healingPointNests.value) {
       if (gx < nest.gridX + nest.width + padding &&
           gx + w + padding > nest.gridX &&
           gy < nest.gridY + nest.height + padding &&
@@ -153,13 +174,18 @@ const initRooms = () => {
     return false
   }
   
-  // Placement zones spread across the LARGER 50x30 map (sized for 8-10 cell rooms)
-  // Zones are positioned to avoid spawn zone (center) and monster nests (corners)
+  // Placement zones dynamically calculated based on map size
+  const gridCols = config.gridCols
+  const gridRows = config.gridRows
+  const zoneMargin = 5
+  const zoneMidX = Math.floor(gridCols / 2)
+  const zoneMidY = Math.floor(gridRows / 2)
+  
   const placementZones = [
-    { minX: 5, maxX: 18, minY: 4, maxY: 14 },      // Top-left area
-    { minX: 5, maxX: 18, minY: 16, maxY: 26 },     // Bottom-left area  
-    { minX: 32, maxX: 45, minY: 4, maxY: 14 },     // Top-right area
-    { minX: 32, maxX: 45, minY: 16, maxY: 26 },    // Bottom-right area
+    { minX: zoneMargin, maxX: zoneMidX - 4, minY: zoneMargin, maxY: zoneMidY - 2 },
+    { minX: zoneMargin, maxX: zoneMidX - 4, minY: zoneMidY + 2, maxY: gridRows - zoneMargin },
+    { minX: zoneMidX + 4, maxX: gridCols - zoneMargin, minY: zoneMargin, maxY: zoneMidY - 2 },
+    { minX: zoneMidX + 4, maxX: gridCols - zoneMargin, minY: zoneMidY + 2, maxY: gridRows - zoneMargin },
     { minX: 5, maxX: 18, minY: 10, maxY: 20 },     // Mid-left area
     { minX: 32, maxX: 45, minY: 10, maxY: 20 },    // Mid-right area
     { minX: 18, maxX: 32, minY: 19, maxY: 28 },    // Bottom-center (below spawn)
@@ -294,7 +320,8 @@ const initRooms = () => {
           doorHp: baseHp,
           doorMaxHp: baseHp,
           doorLevel: 1,
-          doorUpgradeCost: GAME_CONSTANTS.COSTS.upgradeDoor,
+          // Door upgrade cost is scaled by difficulty
+          doorUpgradeCost: Math.round(100 * economyConfig.value.upgradeCostMultiplier),
           doorRepairCooldown: 0,
           doorIsRepairing: false,
           doorRepairTimer: 0,
@@ -302,8 +329,9 @@ const initRooms = () => {
           roomType,
           bedPosition: { x: bedX, y: bedY },
           bedLevel: 1,
-          bedUpgradeCost: GAME_CONSTANTS.BED_BASE_UPGRADE_COST,
-          bedIncome: GAME_CONSTANTS.BED_BASE_INCOME,
+          // Bed upgrade cost and income are scaled by difficulty
+          bedUpgradeCost: Math.round(50 * economyConfig.value.bedUpgradeCostScale),
+          bedIncome: economyConfig.value.bedBaseIncome,
           buildSpots,
           doorPosition: { x: doorX, y: doorY },
           doorGridX,
@@ -321,41 +349,46 @@ const players = reactive<Player[]>([])
 
 const initPlayers = () => {
   players.length = 0
-  const colors: string[] = ['#ef4444', '#3b82f6', '#22c55e', '#a855f7', '#f59e0b']
-  const names: string[] = ['You', 'Bot-1', 'Bot-2', 'Bot-3', 'Bot-4']
+  const pConfig = playerConfig.value
+  const mConfig = mapConfig.value
+  const colors: string[] = ['#ef4444', '#3b82f6', '#22c55e', '#a855f7', '#f59e0b', '#ec4899', '#14b8a6']
+  const names: string[] = ['You', 'Bot-1', 'Bot-2', 'Bot-3', 'Bot-4', 'Bot-5', 'Bot-6']
   
   // Spawn players in the CENTRAL SPAWN ZONE
-  const sz = GAME_CONSTANTS.SPAWN_ZONE
-  const spawnCenterX = (sz.gridX + sz.width / 2) * GAME_CONSTANTS.CELL_SIZE
-  const spawnCenterY = (sz.gridY + sz.height / 2) * GAME_CONSTANTS.CELL_SIZE
+  const sz = spawnZone.value
+  const spawnCenterX = (sz.gridX + sz.width / 2) * mConfig.cellSize
+  const spawnCenterY = (sz.gridY + sz.height / 2) * mConfig.cellSize
   
-  for (let i = 0; i <= GAME_CONSTANTS.AI_COUNT; i++) {
+  // Total players based on difficulty
+  const totalPlayers = pConfig.totalCount
+  
+  for (let i = 0; i < totalPlayers; i++) {
     // Spread players in a circle around center
-    const angle = (i / (GAME_CONSTANTS.AI_COUNT + 1)) * Math.PI * 2
+    const angle = (i / totalPlayers) * Math.PI * 2
     const radius = 40
     const posX = spawnCenterX + Math.cos(angle) * radius
     const posY = spawnCenterY + Math.sin(angle) * radius
     
     players.push({
       id: i,
-      name: names[i] || `Player-${i}`,
+      name: names[i] || `Bot-${i}`,
       isHuman: i === 0,
       roomId: null,
       alive: true,
-      gold: GAME_CONSTANTS.STARTING_GOLD,
-      souls: 0, // New resource for high-level upgrades
-      hp: GAME_CONSTANTS.PLAYER_HP,
-      maxHp: GAME_CONSTANTS.PLAYER_HP,
+      gold: pConfig.startingGold,
+      souls: 0,
+      hp: pConfig.hp,
+      maxHp: pConfig.hp,
       position: { x: posX, y: posY },
       targetPosition: null,
       path: [],
-      speed: GAME_CONSTANTS.PLAYER_SPEED,
+      speed: pConfig.speed,
       state: 'idle',
       animationFrame: 0,
       animationTimer: 0,
       attackCooldown: 0,
-      attackRange: GAME_CONSTANTS.PLAYER_ATTACK_RANGE,
-      damage: GAME_CONSTANTS.PLAYER_DAMAGE,
+      attackRange: pConfig.attackRange,
+      damage: pConfig.damage,
       facingRight: true,
       isSleeping: false,
       sleepTimer: 0,
@@ -367,58 +400,111 @@ const initPlayers = () => {
 }
 
 // Monster with state machine - spawns at random nest
-const getRandomNestPosition = (): Vector2 => {
-  const randomNestIndex = Math.floor(Math.random() * GAME_CONSTANTS.MONSTER_NESTS.length)
-  const nest = GAME_CONSTANTS.MONSTER_NESTS[randomNestIndex]!
+const getRandomNestPosition = (excludeIndex?: number): Vector2 => {
+  const nests = healingPointNests.value
+  let availableNests = nests.filter((_, i) => i !== excludeIndex)
+  if (availableNests.length === 0) availableNests = nests
+  
+  const randomNestIndex = Math.floor(Math.random() * availableNests.length)
+  const nest = availableNests[randomNestIndex]!
   return {
-    x: (nest.gridX + nest.width / 2) * GAME_CONSTANTS.CELL_SIZE,
-    y: (nest.gridY + nest.height / 2) * GAME_CONSTANTS.CELL_SIZE
+    x: (nest.gridX + nest.width / 2) * mapConfig.value.cellSize,
+    y: (nest.gridY + nest.height / 2) * mapConfig.value.cellSize
   }
 }
-const initialMonsterPos = getRandomNestPosition()
 
-const monster = reactive<Monster>({
-  hp: GAME_CONSTANTS.MONSTER_MAX_HP,
-  maxHp: GAME_CONSTANTS.MONSTER_MAX_HP,
-  damage: GAME_CONSTANTS.MONSTER_BASE_DAMAGE,
-  baseDamage: GAME_CONSTANTS.MONSTER_BASE_DAMAGE,
-  level: 1,
-  levelTimer: 0,
-  targetRoomId: null,
-  targetPlayerId: null,
-  targetVanguardId: null, // Priority target when attacked by vanguard
-  position: { ...initialMonsterPos },
-  targetPosition: null,
-  path: [],
-  speed: GAME_CONSTANTS.MONSTER_SPEED,
-  baseSpeed: GAME_CONSTANTS.MONSTER_SPEED,
-  state: 'idle',
-  monsterState: 'search', // State machine
-  attackCooldown: 0,
-  attackRange: GAME_CONSTANTS.MONSTER_ATTACK_RANGE,
-  animationFrame: 0,
-  animationTimer: 0,
-  healZone: { ...initialMonsterPos }, // Same as spawn
-  healZones: GAME_CONSTANTS.MONSTER_NESTS.map(nest => ({
-    x: (nest.gridX + nest.width / 2) * GAME_CONSTANTS.CELL_SIZE,
-    y: (nest.gridY + nest.height / 2) * GAME_CONSTANTS.CELL_SIZE
-  })),
-  isRetreating: false,
-  isFullyHealing: false, // Committed to full heal
-  healIdleTimer: 0, // Idle delay after full heal
-  facingRight: false,
-  targetTimer: 0, // Time spent on current target
-  lastTargets: [] // Recent targets to avoid
-})
+// Support for multiple monsters based on difficulty
+const monsters = reactive<Monster[]>([])
+
+// Create a single monster with config
+const createMonster = (id: number, spawnPos: Vector2): Monster => {
+  const mConfig = monsterConfig.value
+  const cellSize = mapConfig.value.cellSize
+  
+  return {
+    hp: mConfig.maxHp,
+    maxHp: mConfig.maxHp,
+    damage: mConfig.baseDamage,
+    baseDamage: mConfig.baseDamage,
+    level: 1,
+    levelTimer: 0,
+    targetRoomId: null,
+    targetPlayerId: null,
+    targetVanguardId: null,
+    position: { ...spawnPos },
+    targetPosition: null,
+    path: [],
+    speed: mConfig.speed,
+    baseSpeed: mConfig.speed,
+    state: 'idle',
+    monsterState: 'search',
+    attackCooldown: 0,
+    attackRange: mConfig.attackRange,
+    animationFrame: 0,
+    animationTimer: 0,
+    healZone: { ...spawnPos },
+    healZones: healingPointNests.value.map(nest => ({
+      x: (nest.gridX + nest.width / 2) * cellSize,
+      y: (nest.gridY + nest.height / 2) * cellSize
+    })),
+    isRetreating: false,
+    isFullyHealing: false,
+    healIdleTimer: 0,
+    facingRight: false,
+    targetTimer: 0,
+    lastTargets: []
+  }
+}
+
+// Initialize monsters based on difficulty
+const initMonsters = () => {
+  monsters.length = 0
+  const count = monsterConfig.value.count
+  
+  for (let i = 0; i < count; i++) {
+    const spawnPos = getRandomNestPosition(i > 0 ? i - 1 : undefined)
+    monsters.push(createMonster(i, spawnPos))
+  }
+}
+
+// Legacy single monster reference for backward compatibility
+const monster = computed(() => monsters[0] || createMonster(0, getRandomNestPosition()))
 
 // Defense buildings
 const buildings = reactive<DefenseBuilding[]>([])
-const vanguards = reactive<VanguardUnit[]>([]) // Vanguard units
+const vanguards = reactive<VanguardUnit[]>([])
 const particles = reactive<Particle[]>([])
 const projectiles = reactive<Projectile[]>([])
 const floatingTexts = reactive<FloatingText[]>([])
 let floatingTextId = 0
 let vanguardIdCounter = 0
+
+// Healing Points with Mana Power system - initialized dynamically
+const healingPoints = reactive<HealingPoint[]>([])
+
+const initHealingPoints = () => {
+  healingPoints.length = 0
+  const hpConfig = healingPointConfig.value
+  const cellSize = mapConfig.value.cellSize
+  
+  for (const [index, nest] of healingPointNests.value.entries()) {
+    healingPoints.push({
+      id: index,
+      position: {
+        x: (nest.gridX + nest.width / 2) * cellSize,
+        y: (nest.gridY + nest.height / 2) * cellSize
+      },
+      gridX: nest.gridX,
+      gridY: nest.gridY,
+      width: nest.width,
+      height: nest.height,
+      manaPower: hpConfig.maxMana,
+      maxManaPower: hpConfig.maxMana,
+      manaRegenRate: hpConfig.manaRegenRate
+    })
+  }
+}
+
 const humanPlayer = computed(() => players.find(p => p.isHuman)!)
 
 // Check if a door is passable for a specific entity
@@ -1537,91 +1623,139 @@ const updateMonsterAI = (deltaTime: number) => {
     spawnFloatingText(monster.position, `LV ${monster.level}!`, '#ff6b6b', 20)
   }
   
-  // Find nearest monster nest for healing
-  const findNearestNest = (): Vector2 => {
-    let nearest = monster.healZones[0] || monster.healZone
-    let nearestDist = distance(monster.position, nearest)
-    for (const nest of monster.healZones) {
-      const d = distance(monster.position, nest)
+  // Find nearest monster nest with sufficient mana for healing
+  // Returns null if no healing point has enough mana (>=10% capacity)
+  const findNearestHealingPoint = (): HealingPoint | null => {
+    const minMana = GAME_CONSTANTS.HEALING_POINT_MAX_MANA * GAME_CONSTANTS.HEALING_POINT_MIN_MANA_PERCENT
+    const availablePoints = healingPoints.filter(hp => hp.manaPower >= minMana)
+    
+    if (availablePoints.length === 0) return null
+    
+    let nearest = availablePoints[0]!
+    let nearestDist = distance(monster.position, nearest.position)
+    
+    for (const hp of availablePoints) {
+      const d = distance(monster.position, hp.position)
       if (d < nearestDist) {
         nearestDist = d
-        nearest = nest
+        nearest = hp
       }
     }
     return nearest
   }
   
-  // =========================================================================
-  // HEALING COMMITMENT: Monster must fully heal before re-engaging
-  // After full heal, wait ~5 seconds idle before attacking again
-  // =========================================================================
-  
-  // STATE: POST-HEAL IDLE - Wait after full heal before re-engaging
-  if (monster.isFullyHealing && monster.hp >= monster.maxHp) {
-    monster.monsterState = 'heal'
-    monster.state = 'idle'
-    monster.path = []
-    monster.healIdleTimer += deltaTime
-    
-    // Show idle indicator every second
-    if (Math.floor(monster.healIdleTimer) !== Math.floor(monster.healIdleTimer - deltaTime)) {
-      const remainingTime = Math.ceil(GAME_CONSTANTS.MONSTER_HEAL_IDLE_DELAY - monster.healIdleTimer)
-      if (remainingTime > 0) {
-        spawnFloatingText(monster.position, `💤 ${remainingTime}s`, '#fbbf24', 12)
+  // Get healing point monster is currently at (within range)
+  const getHealingPointAtMonster = (): HealingPoint | null => {
+    for (const hp of healingPoints) {
+      if (distance(monster.position, hp.position) < 100) {
+        return hp
       }
     }
-    
-    // After idle delay, re-engage
-    if (monster.healIdleTimer >= GAME_CONSTANTS.MONSTER_HEAL_IDLE_DELAY) {
-      monster.isFullyHealing = false
-      monster.isRetreating = false
-      monster.healIdleTimer = 0
-      monster.speed = monster.baseSpeed
-      monster.targetPlayerId = null
-      monster.monsterState = 're-engage'
-      addMessage(t('messages.monsterFullyRested'))
-    }
-    return
+    return null
   }
   
-  // STATE: RETREAT - when HP is low, go to nearest nest (COMMITTED TO FULL HEAL)
+  // =========================================================================
+  // HEALING WITH MANA SYSTEM: Healing consumes mana, immediate re-engage
+  // No more 5-second idle delay - monster attacks immediately when healed
+  // =========================================================================
+  
+  // STATE: RETREAT - when HP is low, go to nearest nest with mana
   if (monster.hp / monster.maxHp < GAME_CONSTANTS.MONSTER_HEAL_THRESHOLD || monster.isFullyHealing) {
     monster.monsterState = 'retreat'
-    if (!monster.isRetreating && !monster.isFullyHealing) {
-      monster.isRetreating = true
-      monster.isFullyHealing = true // Commit to full heal
-      monster.healIdleTimer = 0
-      monster.speed = monster.baseSpeed * GAME_CONSTANTS.MONSTER_RETREAT_SPEED_BONUS
-      monster.targetPlayerId = null
-      monster.targetTimer = 0
-      addMessage(t('messages.monsterRetreating'))
-    }
     
-    const nearestNest = findNearestNest()
-    const distToHeal = distance(monster.position, nearestNest)
+    const targetHealingPoint = findNearestHealingPoint()
     
-    if (distToHeal > 50) {
-      // Walking to nest
-      if (monster.path.length === 0 || monster.state !== 'walking') {
-        const walkableGrid = createWalkableGrid(-1, true)
-        monster.path = findPath(walkableGrid, monster.position, nearestNest, GAME_CONSTANTS.CELL_SIZE)
-        monster.state = 'walking'
-        monster.targetPosition = nearestNest
+    // If no healing point has sufficient mana, stop retreating and resume combat
+    if (!targetHealingPoint) {
+      if (monster.isFullyHealing || monster.isRetreating) {
+        addMessage(t('messages.healingPointsExhausted'))
+        spawnFloatingText(monster.position, '⚡ No Mana!', '#ef4444', 14)
       }
+      monster.isFullyHealing = false
+      monster.isRetreating = false
+      monster.speed = monster.baseSpeed
+      monster.monsterState = 're-engage'
+      // Continue to normal target selection below
     } else {
-      // STATE: HEAL - regenerate at nest until FULLY healed
-      monster.monsterState = 'heal'
-      monster.state = 'healing'
-      monster.path = []
-      // Heal 20% of max HP per second
-      const healAmount = monster.maxHp * GAME_CONSTANTS.MONSTER_HEAL_RATE * deltaTime
-      monster.hp = Math.min(monster.hp + healAmount, monster.maxHp)
-      spawnParticles(monster.position, 'heal', 1, '#22c55e')
+      // Set retreat state if not already retreating
+      if (!monster.isRetreating && !monster.isFullyHealing) {
+        monster.isRetreating = true
+        monster.isFullyHealing = true
+        monster.healIdleTimer = 0
+        monster.speed = monster.baseSpeed * GAME_CONSTANTS.MONSTER_RETREAT_SPEED_BONUS
+        monster.targetPlayerId = null
+        monster.targetTimer = 0
+        addMessage(t('messages.monsterRetreating'))
+      }
       
-      // Note: Don't exit healing state here - let the idle timer handle re-engagement
-      // This ensures monster stays committed to full heal + idle delay
+      const distToHeal = distance(monster.position, targetHealingPoint.position)
+      
+      if (distToHeal > 50) {
+        // Walking to nest
+        if (monster.path.length === 0 || monster.state !== 'walking') {
+          const walkableGrid = createWalkableGrid(-1, true)
+          monster.path = findPath(walkableGrid, monster.position, targetHealingPoint.position, GAME_CONSTANTS.CELL_SIZE)
+          monster.state = 'walking'
+          monster.targetPosition = targetHealingPoint.position
+        }
+      } else {
+        // STATE: HEAL - regenerate at nest, consuming mana
+        const currentHealPoint = getHealingPointAtMonster()
+        
+        if (currentHealPoint) {
+          const minMana = GAME_CONSTANTS.HEALING_POINT_MAX_MANA * GAME_CONSTANTS.HEALING_POINT_MIN_MANA_PERCENT
+          
+          // Check if current healing point has enough mana to continue healing
+          if (currentHealPoint.manaPower < minMana) {
+            // Mana depleted - leave immediately and resume combat
+            spawnFloatingText(monster.position, '⚡ Out of Mana!', '#fbbf24', 14)
+            monster.isFullyHealing = false
+            monster.isRetreating = false
+            monster.speed = monster.baseSpeed
+            monster.monsterState = 're-engage'
+            addMessage(t('messages.healingPointDepleted'))
+          } else {
+            // Heal using mana - mana cost equals HP restored
+            monster.monsterState = 'heal'
+            monster.state = 'healing'
+            monster.path = []
+            
+            // Calculate heal amount (20% max HP per second)
+            const potentialHeal = monster.maxHp * GAME_CONSTANTS.MONSTER_HEAL_RATE * deltaTime
+            const hpNeeded = monster.maxHp - monster.hp
+            const healAmount = Math.min(potentialHeal, hpNeeded, currentHealPoint.manaPower)
+            
+            // Apply healing and consume mana
+            monster.hp += healAmount
+            currentHealPoint.manaPower -= healAmount
+            
+            // Show mana consumption
+            if (Math.random() < 0.1) {
+              const manaPercent = Math.round((currentHealPoint.manaPower / currentHealPoint.maxManaPower) * 100)
+              spawnFloatingText(currentHealPoint.position, `💧 ${manaPercent}%`, '#60a5fa', 10)
+            }
+            
+            spawnParticles(monster.position, 'heal', 1, '#22c55e')
+            
+            // Check if fully healed - IMMEDIATELY resume hunting (no idle delay)
+            if (monster.hp >= monster.maxHp) {
+              monster.hp = monster.maxHp
+              monster.isFullyHealing = false
+              monster.isRetreating = false
+              monster.speed = monster.baseSpeed
+              monster.targetPlayerId = null
+              monster.monsterState = 're-engage'
+              addMessage(t('messages.monsterFullyHealed'))
+              spawnFloatingText(monster.position, '💪 Full HP!', '#22c55e', 14)
+            }
+          }
+        } else {
+          // Not at a valid healing point despite being close - find new one
+          monster.path = []
+        }
+      }
+      return
     }
-    return
   }
   
   // Reset retreat state if HP is above threshold
@@ -2538,6 +2672,16 @@ const updateVanguardAI = (deltaTime: number) => {
   })
 }
 
+// Update healing points - regenerate mana over time
+const updateHealingPoints = (deltaTime: number) => {
+  for (const hp of healingPoints) {
+    // Regenerate mana at configured rate (50 mana/second)
+    if (hp.manaPower < hp.maxManaPower) {
+      hp.manaPower = Math.min(hp.maxManaPower, hp.manaPower + hp.manaRegenRate * deltaTime)
+    }
+  }
+}
+
 // Update buildings
 const updateBuildings = (deltaTime: number) => {
   buildings.forEach(building => {
@@ -2868,6 +3012,9 @@ const gameLoop = (timestamp: number) => {
     // Vanguards always active
     updateVanguardAI(deltaTime)
     
+    // Healing points mana regeneration
+    updateHealingPoints(deltaTime)
+    
     // Buildings always active (can shoot during countdown too)
     updateBuildings(deltaTime)
     updateProjectiles(deltaTime)
@@ -2962,16 +3109,34 @@ const render = () => {
         ctx.fillRect(px + 2, py + 2, cellSize - 4, cellSize - 4)
       }
       
-      // Heal zone glow (monster nests)
+      // Heal zone glow (monster nests) - intensity based on mana level
       if (cell.type === 'heal_zone') {
-        ctx.fillStyle = `rgba(239, 68, 68, ${0.15 + Math.sin(Date.now() / 400) * 0.1})`
+        // Find the healing point for this cell
+        const healPoint = healingPoints.find(hp => 
+          x >= hp.gridX && x < hp.gridX + hp.width &&
+          y >= hp.gridY && y < hp.gridY + hp.height
+        )
+        const manaPercent = healPoint ? healPoint.manaPower / healPoint.maxManaPower : 0
+        const minManaPercent = GAME_CONSTANTS.HEALING_POINT_MIN_MANA_PERCENT
+        const hasEnoughMana = manaPercent >= minManaPercent
+        
+        // Color intensity based on mana level (red when depleted, green when full)
+        const glowIntensity = 0.15 + Math.sin(Date.now() / 400) * 0.1
+        if (hasEnoughMana) {
+          // Healthy glow - green/blue tint
+          ctx.fillStyle = `rgba(34, 197, 94, ${glowIntensity * manaPercent})`
+        } else {
+          // Depleted - red warning
+          ctx.fillStyle = `rgba(239, 68, 68, ${glowIntensity * 0.5})`
+        }
         ctx.fillRect(px, py, cellSize, cellSize)
-        // Nest icon
-        ctx.fillStyle = 'rgba(239, 68, 68, 0.5)'
+        
+        // Nest icon with mana indicator
+        ctx.fillStyle = hasEnoughMana ? 'rgba(34, 197, 94, 0.6)' : 'rgba(239, 68, 68, 0.5)'
         ctx.font = '16px Arial'
         ctx.textAlign = 'center'
         ctx.textBaseline = 'middle'
-        ctx.fillText('🐉', px + cellSize / 2, py + cellSize / 2)
+        ctx.fillText(hasEnoughMana ? '🐉' : '💀', px + cellSize / 2, py + cellSize / 2)
       }
       
       // Central spawn zone marker
@@ -3000,6 +3165,46 @@ const render = () => {
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   ctx.fillText('⭐ SPAWN ZONE ⭐', szPx + szWidth / 2, szPy + szHeight / 2)
+  
+  // Draw healing point mana bars
+  healingPoints.forEach(hp => {
+    if (!ctx) return
+    const centerX = hp.position.x
+    const barWidth = hp.width * cellSize - 20
+    const barHeight = 12
+    const barX = hp.gridX * cellSize + 10
+    const barY = (hp.gridY + hp.height) * cellSize + 5
+    
+    const manaPercent = hp.manaPower / hp.maxManaPower
+    const minManaPercent = GAME_CONSTANTS.HEALING_POINT_MIN_MANA_PERCENT
+    const hasEnoughMana = manaPercent >= minManaPercent
+    
+    // Background
+    ctx.fillStyle = '#222'
+    ctx.fillRect(barX, barY, barWidth, barHeight)
+    
+    // Mana bar - blue when healthy, red when depleted
+    ctx.fillStyle = hasEnoughMana ? '#3b82f6' : '#ef4444'
+    ctx.fillRect(barX, barY, barWidth * manaPercent, barHeight)
+    
+    // Border
+    ctx.strokeStyle = hasEnoughMana ? '#60a5fa' : '#f87171'
+    ctx.lineWidth = 2
+    ctx.strokeRect(barX, barY, barWidth, barHeight)
+    
+    // Mana text
+    ctx.fillStyle = '#fff'
+    ctx.font = 'bold 10px Arial'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    const manaText = `💧 ${Math.floor(hp.manaPower)}/${hp.maxManaPower}`
+    ctx.fillText(manaText, barX + barWidth / 2, barY + barHeight / 2)
+    
+    // Healing point label
+    ctx.fillStyle = hasEnoughMana ? 'rgba(34, 197, 94, 0.9)' : 'rgba(239, 68, 68, 0.9)'
+    ctx.font = 'bold 12px Arial'
+    ctx.fillText(hasEnoughMana ? '🐉 NEST' : '💀 DEPLETED', centerX, hp.gridY * cellSize - 8)
+  })
   
   // Draw rooms with details
   rooms.forEach(room => {
@@ -3640,7 +3845,7 @@ const render = () => {
     
     ctx.fillStyle = '#fff'
     ctx.font = '18px Arial'
-    ctx.fillText('Monster spawns soon! Claim a room by sleeping • Build defenses now!', canvas.width / 2, 90)
+    ctx.fillText('Quái vật sẽ săn lùng sau thời gian đếm ngược!', canvas.width / 2, 90)
   }
 }
 
@@ -3656,52 +3861,37 @@ const endGame = (win: boolean) => {
 
 // Restart
 const restartGame = () => {
+  // Reset all game state arrays
   buildings.length = 0
   particles.length = 0
   projectiles.length = 0
   floatingTexts.length = 0
   latePlayers.length = 0 // Reset late players tracking
   messageLog.value = []
-  
+
+  // Reset healing points
+  healingPoints.length = 0
+  initHealingPoints()
+
+  // Reset monsters
+  monsters.length = 0
+  initMonsters()
+
+  // Reset players, rooms, grid
   gamePhase.value = 'playing' // Game starts immediately
-  countdown.value = GAME_CONSTANTS.COUNTDOWN_TIME
+  countdown.value = timingConfig.value.countdownTime
   monsterActive.value = false // Monster inactive until countdown ends
   gameOver.value = false
   victory.value = false
-  
+
   initGrid()
   initRooms()
   initPlayers()
-  
-  // Pick a random nest for monster spawn
-  const randomNestIndex = Math.floor(Math.random() * GAME_CONSTANTS.MONSTER_NESTS.length)
-  const spawnNest = GAME_CONSTANTS.MONSTER_NESTS[randomNestIndex]!
-  const spawnX = (spawnNest.gridX + spawnNest.width / 2) * GAME_CONSTANTS.CELL_SIZE
-  const spawnY = (spawnNest.gridY + spawnNest.height / 2) * GAME_CONSTANTS.CELL_SIZE
-  
-  // Reset monster with leveling system
-  monster.hp = GAME_CONSTANTS.MONSTER_MAX_HP
-  monster.maxHp = GAME_CONSTANTS.MONSTER_MAX_HP
-  monster.damage = GAME_CONSTANTS.MONSTER_BASE_DAMAGE
-  monster.baseDamage = GAME_CONSTANTS.MONSTER_BASE_DAMAGE
-  monster.level = 1
-  monster.levelTimer = 0
-  monster.speed = GAME_CONSTANTS.MONSTER_SPEED
-  monster.baseSpeed = GAME_CONSTANTS.MONSTER_SPEED
-  monster.position = { x: spawnX, y: spawnY }
-  monster.path = []
-  monster.state = 'idle'
-  monster.monsterState = 'search'
-  monster.isRetreating = false
-  monster.targetRoomId = null
-  monster.targetPlayerId = null
-  monster.targetTimer = 0
-  monster.lastTargets = []
-  monster.attackCooldown = 0
-  
+
+  // Camera reset
   camera.x = 0
   camera.y = 0
-  
+
   startBgm()
   lastTime = performance.now()
   animationId = requestAnimationFrame(gameLoop)
@@ -4069,42 +4259,42 @@ onUnmounted(() => {
             <!-- Turret -->
             <button
               class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-amber-500/50 hover:bg-white/10"
-              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < GAME_CONSTANTS.COSTS.turret }"
-              :disabled="(humanPlayer?.gold || 0) < GAME_CONSTANTS.COSTS.turret"
+              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < economyConfig.turretCost }"
+              :disabled="(humanPlayer?.gold || 0) < economyConfig.turretCost"
               @click="buildDefense('turret')">
               <div class="text-2xl mb-1">🔫</div>
               <div class="font-bold text-sm">{{ t('ui.turret') }}</div>
-              <div class="text-xs text-amber-400">{{ GAME_CONSTANTS.COSTS.turret }}g</div>
+              <div class="text-xs text-amber-400">{{ economyConfig.turretCost }}g</div>
             </button>
             <!-- ATM -->
             <button
               class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-purple-500/50 hover:bg-white/10"
-              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.souls || 0) < GAME_CONSTANTS.COSTS.atm }"
-              :disabled="(humanPlayer?.souls || 0) < GAME_CONSTANTS.COSTS.atm"
+              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.souls || 0) < economyConfig.atmCost }"
+              :disabled="(humanPlayer?.souls || 0) < economyConfig.atmCost"
               @click="buildDefense('atm')">
               <div class="text-2xl mb-1">🏧</div>
               <div class="font-bold text-sm">{{ t('ui.atm') }}</div>
-              <div class="text-xs text-purple-400">{{ GAME_CONSTANTS.COSTS.atm }}👻</div>
+              <div class="text-xs text-purple-400">{{ economyConfig.atmCost }}👻</div>
             </button>
             <!-- Soul Collector -->
             <button
               class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-purple-500/50 hover:bg-white/10"
-              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < GAME_CONSTANTS.COSTS.soulCollector }"
-              :disabled="(humanPlayer?.gold || 0) < GAME_CONSTANTS.COSTS.soulCollector"
+              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < economyConfig.soulCollectorCost }"
+              :disabled="(humanPlayer?.gold || 0) < economyConfig.soulCollectorCost"
               @click="buildDefense('soul_collector')">
               <div class="text-2xl mb-1">👻</div>
               <div class="font-bold text-sm">{{ t('ui.soul') }}</div>
-              <div class="text-xs text-amber-400">{{ GAME_CONSTANTS.COSTS.soulCollector }}g</div>
+              <div class="text-xs text-amber-400">{{ economyConfig.soulCollectorCost }}g</div>
             </button>
             <!-- Vanguard -->
             <button
               class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-indigo-500/50 hover:bg-white/10"
-              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < GAME_CONSTANTS.VANGUARD.GOLD_COST }"
-              :disabled="(humanPlayer?.gold || 0) < GAME_CONSTANTS.VANGUARD.GOLD_COST"
+              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < economyConfig.vanguardCost }"
+              :disabled="(humanPlayer?.gold || 0) < economyConfig.vanguardCost"
               @click="buildDefense('vanguard')">
               <div class="text-2xl mb-1">⚔️</div>
               <div class="font-bold text-sm">{{ t('ui.vanguard') }}</div>
-              <div class="text-xs text-amber-400">{{ GAME_CONSTANTS.VANGUARD.GOLD_COST }}g</div>
+              <div class="text-xs text-amber-400">{{ economyConfig.vanguardCost }}g</div>
             </button>
           </div>
           <p class="text-xs text-neutral-500 mt-3 text-center">{{ t('ui.vanguardDesc') }}</p>

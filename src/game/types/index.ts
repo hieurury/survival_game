@@ -100,6 +100,21 @@ export interface Player extends BaseEntity {
 }
 
 // =============================================================================
+// HEALING POINT TYPES
+// =============================================================================
+export interface HealingPoint {
+  id: number
+  position: Vector2
+  gridX: number
+  gridY: number
+  width: number
+  height: number
+  manaPower: number
+  maxManaPower: number
+  manaRegenRate: number
+}
+
+// =============================================================================
 // MONSTER TYPES
 // =============================================================================
 export type MonsterState = 'search' | 'attack' | 'disengage' | 'retreat' | 'heal' | 're-engage'

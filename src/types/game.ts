@@ -98,6 +98,19 @@ export interface Player {
 
 export type MonsterState = 'search' | 'attack' | 'disengage' | 'retreat' | 'heal' | 're-engage'
 
+// Healing Point - monster healing zone with mana resource
+export interface HealingPoint {
+  id: number
+  position: Vector2
+  gridX: number
+  gridY: number
+  width: number
+  height: number
+  manaPower: number
+  maxManaPower: number
+  manaRegenRate: number
+}
+
 export interface Monster {
   hp: number
   maxHp: number
@@ -224,13 +237,16 @@ export const GAME_CONSTANTS = {
     height: 6, // 6 cells tall
   },
   
-  // Monster Nest Zones (4 corners for healing)
+  // Monster Nest Zones (2 opposite corners for healing with mana system)
   MONSTER_NESTS: [
     { gridX: 0, gridY: 0, width: 4, height: 4 },       // Top-left
-    { gridX: 46, gridY: 0, width: 4, height: 4 },      // Top-right
-    { gridX: 0, gridY: 26, width: 4, height: 4 },      // Bottom-left
     { gridX: 46, gridY: 26, width: 4, height: 4 },     // Bottom-right
   ],
+  
+  // Healing Point Mana System
+  HEALING_POINT_MAX_MANA: 5000,
+  HEALING_POINT_MANA_REGEN: 50, // mana per second
+  HEALING_POINT_MIN_MANA_PERCENT: 0.10, // 10% minimum to allow healing
   
   // Viewport (what player sees) - optimized for mobile
   VIEWPORT_WIDTH: 960,
