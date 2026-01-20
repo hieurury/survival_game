@@ -128,6 +128,7 @@ export interface Monster {
   targetRoomId: number | null
   targetPlayerId: number | null
   targetVanguardId: number | null // Priority target when attacked by vanguard
+  targetHealingPointId: number | null // Locked healing point during retreat
   position: Vector2
   targetPosition: Vector2 | null
   path: Vector2[]

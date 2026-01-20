@@ -222,7 +222,7 @@ export const EASY_MODE: GameModeConfig = {
     count: 2,
     maxMana: 1000,
     manaRegenRate: 50,
-    minManaPercent: 0.5,
+    minManaPercent: 1,
   },
   
   // Spawn zone at center of map: (60-8)/2 = 26, (40-6)/2 = 17

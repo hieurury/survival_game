@@ -492,6 +492,7 @@ const createMonster = (monsterId: number, spawnPos: Vector2): Monster => {
     targetRoomId: null,
     targetPlayerId: null,
     targetVanguardId: null,
+    targetHealingPointId: null,
     position: { ...spawnPos },
     targetPosition: null,
     path: [],
@@ -1761,6 +1762,12 @@ const updateMonsterAI = (deltaTime: number) => {
       return nearest
     }
     
+    // Get the locked healing point by ID
+    const getLockedHealingPoint = (): HealingPoint | null => {
+      if (monster.targetHealingPointId === null) return null
+      return healingPoints.find(hp => hp.id === monster.targetHealingPointId) || null
+    }
+    
     // Get healing point monster is currently at (within range)
     const getHealingPointAtMonster = (): HealingPoint | null => {
       for (const hp of healingPoints) {
@@ -1773,13 +1780,31 @@ const updateMonsterAI = (deltaTime: number) => {
     
     // =========================================================================
     // HEALING WITH MANA SYSTEM: Healing consumes mana, immediate re-engage
+    // Monster locks onto ONE healing point until fully healed or mana depleted
     // =========================================================================
     
     // STATE: RETREAT - when HP is low, go to nearest nest with mana
     if (monster.hp / monster.maxHp < mConfig.healThreshold || monster.isFullyHealing) {
       monster.monsterState = 'retreat'
       
-      const targetHealingPoint = findNearestHealingPoint()
+      // Use locked healing point if available, otherwise find new one
+      let targetHealingPoint = getLockedHealingPoint()
+      
+      // Check if locked point is still valid (has enough mana)
+      if (targetHealingPoint && targetHealingPoint.manaPower < minMana) {
+        // Locked point depleted - clear it and find new one
+        monster.targetHealingPointId = null
+        targetHealingPoint = null
+      }
+      
+      // If no locked point, find a new one
+      if (!targetHealingPoint) {
+        targetHealingPoint = findNearestHealingPoint()
+        if (targetHealingPoint) {
+          // Lock onto this healing point
+          monster.targetHealingPointId = targetHealingPoint.id
+        }
+      }
       
       // If no healing point has sufficient mana, stop retreating and resume combat
       if (!targetHealingPoint) {
@@ -1789,6 +1814,7 @@ const updateMonsterAI = (deltaTime: number) => {
         }
         monster.isFullyHealing = false
         monster.isRetreating = false
+        monster.targetHealingPointId = null
         monster.speed = monster.baseSpeed
         monster.monsterState = 're-engage'
       } else {
@@ -1815,18 +1841,18 @@ const updateMonsterAI = (deltaTime: number) => {
           }
         } else {
           // STATE: HEAL - regenerate at nest, consuming mana
+          // Only heal at the LOCKED healing point
           const currentHealPoint = getHealingPointAtMonster()
           
-          if (currentHealPoint) {
+          // Make sure we're at the locked healing point, not a different one
+          if (currentHealPoint && currentHealPoint.id === monster.targetHealingPointId) {
             // Check if current healing point has enough mana to continue healing
             if (currentHealPoint.manaPower < minMana) {
-              // Mana depleted - leave immediately and resume combat
+              // Mana depleted - clear lock and find new point or resume combat
               spawnFloatingText(monster.position, '⚡ Out of Mana!', '#fbbf24', 14)
-              monster.isFullyHealing = false
-              monster.isRetreating = false
-              monster.speed = monster.baseSpeed
-              monster.monsterState = 're-engage'
-              addMessage(t('messages.healingPointDepleted'))
+              monster.targetHealingPointId = null
+              monster.path = []
+              // Will re-evaluate on next frame (find new point or resume combat)
             } else {
               // Heal using mana - mana cost equals HP restored
               monster.monsterState = 'heal'
@@ -1855,6 +1881,7 @@ const updateMonsterAI = (deltaTime: number) => {
                 monster.hp = monster.maxHp
                 monster.isFullyHealing = false
                 monster.isRetreating = false
+                monster.targetHealingPointId = null
                 monster.speed = monster.baseSpeed
                 monster.targetPlayerId = null
                 monster.monsterState = 're-engage'
@@ -1863,7 +1890,7 @@ const updateMonsterAI = (deltaTime: number) => {
               }
             }
           } else {
-            // Not at a valid healing point despite being close - find new one
+            // Not at the locked healing point - keep moving
             monster.path = []
           }
         }
@@ -1873,6 +1900,7 @@ const updateMonsterAI = (deltaTime: number) => {
     
     // Reset retreat state if HP is above threshold
     monster.isRetreating = false
+    monster.targetHealingPointId = null
     monster.speed = monster.baseSpeed
     
     // Track target timer (30s max per target) - config driven
