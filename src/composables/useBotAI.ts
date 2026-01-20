@@ -251,7 +251,7 @@ function scoreUpgradeBed(ctx: BotContext): ActionScore {
 
 function scoreBuildSoulCollector(ctx: BotContext): ActionScore {
   const { player, mySoulCollectors, myTurrets, room, emptyBuildSpot } = ctx
-  const canAfford = player.gold >= GAME_CONSTANTS.COSTS.soulCollector
+  const canAfford = player.gold >= GAME_CONSTANTS.COSTS.soul_collector
   
   if (!canAfford || mySoulCollectors.length >= 1 || !emptyBuildSpot || !room) {
     return { action: 'build_soul_collector', score: 0, reason: 'Cannot build soul collector' }

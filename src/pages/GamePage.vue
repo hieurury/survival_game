@@ -28,7 +28,7 @@ const {
 const buildingCosts = computed(() => ({
   turret: Math.floor(GAME_CONSTANTS.COSTS.turret * economyConfig.value.buildingCostMultiplier),
   atm: Math.floor(GAME_CONSTANTS.COSTS.atm * economyConfig.value.buildingCostMultiplier), // ATM costs souls
-  soulCollector: Math.floor(GAME_CONSTANTS.COSTS.soulCollector * economyConfig.value.buildingCostMultiplier),
+  soulCollector: Math.floor(GAME_CONSTANTS.COSTS.soul_collector * economyConfig.value.buildingCostMultiplier),
   vanguard: Math.floor(GAME_CONSTANTS.VANGUARD.GOLD_COST * economyConfig.value.buildingCostMultiplier),
   smg: Math.floor(GAME_CONSTANTS.COSTS.smg * economyConfig.value.buildingCostMultiplier),
   upgradeDoor: Math.floor(GAME_CONSTANTS.COSTS.upgradeDoor * economyConfig.value.upgradeCostMultiplier)
@@ -1746,9 +1746,12 @@ const updateMonsterAI = (deltaTime: number) => {
     }
     
     // Find nearest monster nest with sufficient mana for healing
-    const minMana = hConfig.maxMana * hConfig.minManaPercent
+    // minMana is only used when STARTING to find a healing point
+    const minManaToStart = hConfig.maxMana * hConfig.minManaPercent
+    
     const findNearestHealingPoint = (): HealingPoint | null => {
-      const availablePoints = healingPoints.filter(hp => hp.manaPower >= minMana)
+      // Filter points with enough mana to START healing
+      const availablePoints = healingPoints.filter(hp => hp.manaPower >= minManaToStart)
       if (availablePoints.length === 0) return null
       let nearest = availablePoints[0]!
       let nearestDist = distance(monster.position, nearest.position)
@@ -1768,19 +1771,10 @@ const updateMonsterAI = (deltaTime: number) => {
       return healingPoints.find(hp => hp.id === monster.targetHealingPointId) || null
     }
     
-    // Get healing point monster is currently at (within range)
-    const getHealingPointAtMonster = (): HealingPoint | null => {
-      for (const hp of healingPoints) {
-        if (distance(monster.position, hp.position) < 100) {
-          return hp
-        }
-      }
-      return null
-    }
-    
     // =========================================================================
     // HEALING WITH MANA SYSTEM: Healing consumes mana, immediate re-engage
-    // Monster locks onto ONE healing point until fully healed or mana depleted
+    // Monster locks onto ONE healing point until fully healed or mana FULLY depleted
+    // Once locked, monster stays until: (1) fully healed OR (2) mana = 0
     // =========================================================================
     
     // STATE: RETREAT - when HP is low, go to nearest nest with mana
@@ -1790,14 +1784,16 @@ const updateMonsterAI = (deltaTime: number) => {
       // Use locked healing point if available, otherwise find new one
       let targetHealingPoint = getLockedHealingPoint()
       
-      // Check if locked point is still valid (has enough mana)
-      if (targetHealingPoint && targetHealingPoint.manaPower < minMana) {
-        // Locked point depleted - clear it and find new one
+      // Check if locked point is COMPLETELY depleted (mana = 0)
+      // Note: We only abandon when mana is 0, not when below minMana
+      if (targetHealingPoint && targetHealingPoint.manaPower <= 0) {
+        // Locked point fully depleted - clear it and find new one
         monster.targetHealingPointId = null
         targetHealingPoint = null
+        spawnFloatingText(monster.position, '⚡ Mana hết!', '#fbbf24', 14)
       }
       
-      // If no locked point, find a new one
+      // If no locked point, find a new one (using minMana threshold)
       if (!targetHealingPoint) {
         targetHealingPoint = findNearestHealingPoint()
         if (targetHealingPoint) {
@@ -1830,68 +1826,53 @@ const updateMonsterAI = (deltaTime: number) => {
         }
         
         const distToHeal = distance(monster.position, targetHealingPoint.position)
+        const HEAL_RANGE = 80 // Distance to start healing
         
-        if (distToHeal > 50) {
-          // Walking to nest
-          if (monster.path.length === 0 || monster.state !== 'walking') {
+        if (distToHeal > HEAL_RANGE) {
+          // Walking to locked healing point
+          monster.state = 'walking'
+          monster.targetPosition = targetHealingPoint.position
+          
+          // Recalculate path only if needed
+          if (monster.path.length === 0) {
             const walkableGrid = createWalkableGrid(-1, true)
             monster.path = findPath(walkableGrid, monster.position, targetHealingPoint.position, cellSize)
-            monster.state = 'walking'
-            monster.targetPosition = targetHealingPoint.position
           }
         } else {
-          // STATE: HEAL - regenerate at nest, consuming mana
-          // Only heal at the LOCKED healing point
-          const currentHealPoint = getHealingPointAtMonster()
+          // STATE: HEAL - at the locked healing point, regenerate using mana
+          monster.monsterState = 'heal'
+          monster.state = 'healing'
+          monster.path = []
+          monster.targetPosition = null
           
-          // Make sure we're at the locked healing point, not a different one
-          if (currentHealPoint && currentHealPoint.id === monster.targetHealingPointId) {
-            // Check if current healing point has enough mana to continue healing
-            if (currentHealPoint.manaPower < minMana) {
-              // Mana depleted - clear lock and find new point or resume combat
-              spawnFloatingText(monster.position, '⚡ Out of Mana!', '#fbbf24', 14)
-              monster.targetHealingPointId = null
-              monster.path = []
-              // Will re-evaluate on next frame (find new point or resume combat)
-            } else {
-              // Heal using mana - mana cost equals HP restored
-              monster.monsterState = 'heal'
-              monster.state = 'healing'
-              monster.path = []
-              
-              // Calculate heal amount using config
-              const potentialHeal = monster.maxHp * mConfig.healRate * deltaTime
-              const hpNeeded = monster.maxHp - monster.hp
-              const healAmount = Math.min(potentialHeal, hpNeeded, currentHealPoint.manaPower)
-              
-              // Apply healing and consume mana
-              monster.hp += healAmount
-              currentHealPoint.manaPower -= healAmount
-              
-              // Show mana consumption
-              if (Math.random() < 0.1) {
-                const manaPercent = Math.round((currentHealPoint.manaPower / currentHealPoint.maxManaPower) * 100)
-                spawnFloatingText(currentHealPoint.position, `💧 ${manaPercent}%`, '#60a5fa', 10)
-              }
-              
-              spawnParticles(monster.position, 'heal', 1, '#22c55e')
-              
-              // Check if fully healed - IMMEDIATELY resume hunting (no idle delay)
-              if (monster.hp >= monster.maxHp) {
-                monster.hp = monster.maxHp
-                monster.isFullyHealing = false
-                monster.isRetreating = false
-                monster.targetHealingPointId = null
-                monster.speed = monster.baseSpeed
-                monster.targetPlayerId = null
-                monster.monsterState = 're-engage'
-                addMessage(t('messages.monsterFullyHealed'))
-                spawnFloatingText(monster.position, '💪 Full HP!', '#22c55e', 14)
-              }
-            }
-          } else {
-            // Not at the locked healing point - keep moving
-            monster.path = []
+          // Calculate heal amount using config
+          const potentialHeal = monster.maxHp * mConfig.healRate * deltaTime
+          const hpNeeded = monster.maxHp - monster.hp
+          const healAmount = Math.min(potentialHeal, hpNeeded, targetHealingPoint.manaPower)
+          
+          // Apply healing and consume mana
+          monster.hp += healAmount
+          targetHealingPoint.manaPower -= healAmount
+          
+          // Show mana consumption occasionally
+          if (Math.random() < 0.05) {
+            const manaPercent = Math.round((targetHealingPoint.manaPower / targetHealingPoint.maxManaPower) * 100)
+            spawnFloatingText(targetHealingPoint.position, `💧 ${manaPercent}%`, '#60a5fa', 10)
+          }
+          
+          spawnParticles(monster.position, 'heal', 1, '#22c55e')
+          
+          // Check if fully healed - resume hunting
+          if (monster.hp >= monster.maxHp) {
+            monster.hp = monster.maxHp
+            monster.isFullyHealing = false
+            monster.isRetreating = false
+            monster.targetHealingPointId = null
+            monster.speed = monster.baseSpeed
+            monster.targetPlayerId = null
+            monster.monsterState = 're-engage'
+            addMessage(t('messages.monsterFullyHealed'))
+            spawnFloatingText(monster.position, '💪 Full HP!', '#22c55e', 14)
           }
         }
         continue // Skip to next monster
@@ -2369,7 +2350,7 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     // ACTION 6: BUILD SOUL COLLECTOR (Economy - needed for ATM)
     // ------------------------------------------------------------------
     const economySpot = findEmptySpot()
-    if (mySoulCollectors.length === 0 && player.gold >= GAME_CONSTANTS.COSTS.soulCollector && economySpot) {
+    if (mySoulCollectors.length === 0 && player.gold >= GAME_CONSTANTS.COSTS.soul_collector && economySpot) {
       let score = 40
       // Only build if we have basic defense
       if (myTurrets.length >= 2 && myRoom.doorLevel >= 2) score += 30

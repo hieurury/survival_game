@@ -310,7 +310,7 @@ export const GAME_CONSTANTS = {
     upgradeDoor: 40, // Base cost (DOOR_BALANCE.BASE_UPGRADE_COST)
     turret: 10, // Turret cost in gold
     atm: 200, // ATM costs SOULS, not gold!
-    soulCollector: 440, // Soul collector cost in gold
+    soul_collector: 440, // Soul collector cost in gold
     vanguard: 150, // Vanguard cost in gold
     smg: 100, // SMG (Súng tiểu liên) cost in gold
     moveRoom: 6,

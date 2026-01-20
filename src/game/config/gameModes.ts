@@ -220,9 +220,9 @@ export const EASY_MODE: GameModeConfig = {
   
   healingPoints: {
     count: 2,
-    maxMana: 1000,
-    manaRegenRate: 50,
-    minManaPercent: 1,
+    maxMana: 2000,
+    manaRegenRate: 20,
+    minManaPercent: 0.1, // 10% - minimum mana to START healing
   },
   
   // Spawn zone at center of map: (60-8)/2 = 26, (40-6)/2 = 17
