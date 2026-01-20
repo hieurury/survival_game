@@ -45,9 +45,9 @@ export const MONSTER_BALANCE = {
   /** HP multiplier per level */
   HP_SCALE: 1.3,
   /** Base seconds for first level up */
-  BASE_LEVEL_TIME: 30,
+  BASE_LEVEL_TIME: 25,
   /** Additional seconds per level */
-  LEVEL_TIME_INCREMENT: 10,
+  LEVEL_TIME_INCREMENT: 5,
 } as const
 
 // =============================================================================
