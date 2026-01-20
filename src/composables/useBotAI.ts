@@ -468,7 +468,8 @@ export function executeBuildStructure(
   spot: Vector2,
   cellSize: number
 ): BotActionResult {
-  const cost = GAME_CONSTANTS.COSTS[type === 'soul_collector' ? 'soulCollector' : type]
+  // Get cost - all building types use their type name directly in COSTS
+  const cost = GAME_CONSTANTS.COSTS[type as keyof typeof GAME_CONSTANTS.COSTS] || 0
   const useSouls = type === 'atm'
   
   // Check affordability
@@ -481,7 +482,7 @@ export function executeBuildStructure(
   }
   
   const stats = GAME_CONSTANTS.BUILDINGS[type]
-  buildings.push({
+  const newBuilding: DefenseBuilding = {
     id: buildings.length,
     type,
     level: 1,
@@ -501,9 +502,24 @@ export function executeBuildStructure(
     upgradeCost: stats.upgradeCost,
     goldRate: 'goldRate' in stats ? stats.goldRate : undefined,
     soulRate: 'soulRate' in stats ? stats.soulRate : undefined,
-  })
+    // SMG specific fields
+    burstCount: type === 'smg' ? GAME_CONSTANTS.SMG.BURST_COUNT : undefined,
+    burstIndex: type === 'smg' ? 0 : undefined,
+    burstCooldown: type === 'smg' ? 0 : undefined,
+    soulCost: 0,
+  }
+  buildings.push(newBuilding)
   
-  const icon = type === 'turret' ? '🔫' : type === 'atm' ? '🏧' : '👻'
+  // Icon based on building type
+  const icons: Record<string, string> = {
+    turret: '🔫',
+    atm: '🏧',
+    soul_collector: '👻',
+    vanguard: '⚔️',
+    smg: '🔥'
+  }
+  const icon = icons[type] || '🏗️'
+  
   return {
     success: true,
     message: `Built ${type}`,
@@ -518,8 +534,17 @@ export function executeUpgradeTurret(
   getBuildingRange: (base: number, level: number) => number,
   cellSize: number
 ): BotActionResult {
-  if (player.gold < turret.upgradeCost || turret.level >= 5) {
+  if (player.gold < turret.upgradeCost || turret.level >= 10) {
     return { success: false, message: 'Cannot upgrade turret' }
+  }
+  
+  // Level 4+ requires souls
+  if (turret.level >= 4) {
+    const soulCost = GAME_CONSTANTS.SOUL_UPGRADE_COST * (turret.level - 3)
+    if (player.souls < soulCost) {
+      return { success: false, message: 'Not enough souls for upgrade' }
+    }
+    player.souls -= soulCost
   }
   
   player.gold -= turret.upgradeCost
@@ -541,8 +566,17 @@ export function executeUpgradeATM(
   atm: DefenseBuilding,
   cellSize: number
 ): BotActionResult {
-  if (player.gold < atm.upgradeCost || atm.level >= 5) {
+  if (player.gold < atm.upgradeCost || atm.level >= 10) {
     return { success: false, message: 'Cannot upgrade ATM' }
+  }
+  
+  // Level 4+ requires souls
+  if (atm.level >= 4) {
+    const soulCost = GAME_CONSTANTS.SOUL_UPGRADE_COST * (atm.level - 3)
+    if (player.souls < soulCost) {
+      return { success: false, message: 'Not enough souls for upgrade' }
+    }
+    player.souls -= soulCost
   }
   
   player.gold -= atm.upgradeCost

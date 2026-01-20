@@ -1840,6 +1840,18 @@ const updateMonsterAI = (deltaTime: number) => {
           }
         } else {
           // STATE: HEAL - at the locked healing point, regenerate using mana
+          // Check if mana is depleted - stop healing immediately
+          if (targetHealingPoint.manaPower <= 0) {
+            spawnFloatingText(monster.position, '⚡ Hết mana!', '#fbbf24', 14)
+            monster.isFullyHealing = false
+            monster.isRetreating = false
+            monster.targetHealingPointId = null
+            monster.speed = monster.baseSpeed
+            monster.monsterState = 're-engage'
+            addMessage(t('messages.healingPointDepleted'))
+            continue // Skip to next monster
+          }
+          
           monster.monsterState = 'heal'
           monster.state = 'healing'
           monster.path = []
@@ -2325,7 +2337,14 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     // ------------------------------------------------------------------
     // ACTION 5: UPGRADE TURRET (Defense scaling)
     // ------------------------------------------------------------------
-    const upgradableTurret = myTurrets.find(t => t.level < 5 && player.gold >= t.upgradeCost)
+    const soulCostForUpgrade = (level: number) => level >= 4 ? GAME_CONSTANTS.SOUL_UPGRADE_COST * (level - 3) : 0
+    const upgradableTurret = myTurrets.find(t => {
+      if (t.level >= 10) return false
+      if (player.gold < t.upgradeCost) return false
+      const soulCost = soulCostForUpgrade(t.level)
+      if (soulCost > 0 && player.souls < soulCost) return false
+      return true
+    })
     if (upgradableTurret) {
       let score = 50
       // High threat = upgrade turrets
@@ -2342,6 +2361,76 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
             spawnFloatingText(result.floatingText.position, result.floatingText.text, result.floatingText.color, result.floatingText.size)
           }
           return result.success
+        }
+      })
+    }
+    
+    // ------------------------------------------------------------------
+    // ACTION 5B: BUILD SMG (High DPS multi-shot weapon)
+    // SMG fires burst of 10 bullets, great for sustained damage
+    // ------------------------------------------------------------------
+    const mySMGs = buildings.filter(b => b.ownerId === player.id && b.type === 'smg' && b.hp > 0)
+    const smgSpot = findBestTurretSpot() // Use same strategic placement as turrets
+    if (mySMGs.length < 2 && player.gold >= GAME_CONSTANTS.COSTS.smg && smgSpot) {
+      let score = 55
+      // SMG is good after having basic turrets
+      if (myTurrets.length >= 2) score += 30
+      // First SMG is valuable for burst damage
+      if (mySMGs.length === 0) score += 25
+      // High threat = more weapons
+      if (threatLevel === 'high' || threatLevel === 'critical') score *= 1.4
+      
+      actions.push({
+        action: 'build_smg',
+        score,
+        execute: () => {
+          const spot = findBestTurretSpot()
+          if (!spot) return false
+          const result = BotAI.executeBuildStructure(player, buildings, 'smg', spot, GAME_CONSTANTS.CELL_SIZE)
+          if (result.success && result.floatingText) {
+            spawnFloatingText(result.floatingText.position, result.floatingText.text, result.floatingText.color, result.floatingText.size)
+          }
+          return result.success
+        }
+      })
+    }
+    
+    // ------------------------------------------------------------------
+    // ACTION 5C: UPGRADE SMG (Damage and range scaling)
+    // ------------------------------------------------------------------
+    const upgradableSMG = mySMGs.find(s => {
+      if (s.level >= 10) return false
+      if (player.gold < s.upgradeCost) return false
+      const soulCost = soulCostForUpgrade(s.level)
+      if (soulCost > 0 && player.souls < soulCost) return false
+      return true
+    })
+    if (upgradableSMG) {
+      let score = 48
+      // High threat = upgrade weapons
+      if (threatLevel === 'high' || threatLevel === 'critical') score *= 1.5
+      // Prioritize if SMG level is low relative to monster
+      if (upgradableSMG.level < monsterLevel) score += 25
+      
+      actions.push({
+        action: 'upgrade_smg',
+        score,
+        execute: () => {
+          // Check souls requirement for level 4+
+          if (upgradableSMG.level >= 4) {
+            const soulCost = GAME_CONSTANTS.SOUL_UPGRADE_COST * (upgradableSMG.level - 3)
+            if (player.souls < soulCost) return false
+            player.souls -= soulCost
+          }
+          if (player.gold < upgradableSMG.upgradeCost) return false
+          player.gold -= upgradableSMG.upgradeCost
+          upgradableSMG.level++
+          upgradableSMG.damage = getBuildingDamage(upgradableSMG.baseDamage, upgradableSMG.level)
+          upgradableSMG.range = getBuildingRange(upgradableSMG.baseRange, upgradableSMG.level)
+          upgradableSMG.upgradeCost *= 2
+          const pos = gridToWorld({ x: upgradableSMG.gridX, y: upgradableSMG.gridY }, GAME_CONSTANTS.CELL_SIZE)
+          spawnFloatingText(pos, `🔥 LV${upgradableSMG.level}!`, '#f97316', 12)
+          return true
         }
       })
     }
@@ -2400,7 +2489,13 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     // ------------------------------------------------------------------
     // ACTION 8: UPGRADE SOUL COLLECTOR
     // ------------------------------------------------------------------
-    const upgradableSoulCollector = mySoulCollectors.find(s => s.level < 5 && player.gold >= s.upgradeCost)
+    const upgradableSoulCollector = mySoulCollectors.find(s => {
+      if (s.level >= 10) return false
+      if (player.gold < s.upgradeCost) return false
+      const soulCost = soulCostForUpgrade(s.level)
+      if (soulCost > 0 && player.souls < soulCost) return false
+      return true
+    })
     if (upgradableSoulCollector) {
       let score = 30
       if (threatLevel === 'low') score *= 1.5
@@ -2426,7 +2521,13 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     // ------------------------------------------------------------------
     // ACTION 9: UPGRADE ATM
     // ------------------------------------------------------------------
-    const upgradableATM = myATMs.find(a => a.level < 5 && player.gold >= a.upgradeCost)
+    const upgradableATM = myATMs.find(a => {
+      if (a.level >= 10) return false
+      if (player.gold < a.upgradeCost) return false
+      const soulCost = soulCostForUpgrade(a.level)
+      if (soulCost > 0 && player.souls < soulCost) return false
+      return true
+    })
     if (upgradableATM) {
       let score = 35
       if (threatLevel === 'low') score *= 1.5
