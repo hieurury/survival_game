@@ -151,10 +151,11 @@ function scoreUpgradeDoor(ctx: BotContext): ActionScore {
   if (!ctx.room) return { action: 'upgrade_door', score: 0, reason: 'No room' }
   
   const { player, room } = ctx
-  const canAfford = player.gold >= room.doorUpgradeCost
+  const canAffordGold = player.gold >= room.doorUpgradeCost
+  const canAffordSouls = (room.doorSoulCost || 0) <= 0 || player.souls >= (room.doorSoulCost || 0)
   const doorHpPercent = room.doorHp / room.doorMaxHp
   
-  if (!canAfford || room.doorLevel >= 10) {
+  if (!canAffordGold || !canAffordSouls || room.doorLevel >= 10) {
     return { action: 'upgrade_door', score: 0, reason: 'Cannot afford or max level' }
   }
   
@@ -224,9 +225,10 @@ function scoreUpgradeBed(ctx: BotContext): ActionScore {
   if (!ctx.room) return { action: 'upgrade_bed', score: 0, reason: 'No room' }
   
   const { player, room, myTurrets } = ctx
-  const canAfford = player.gold >= room.bedUpgradeCost
+  const canAffordGold = player.gold >= room.bedUpgradeCost
+  const canAffordSouls = (room.bedSoulCost || 0) <= 0 || player.souls >= (room.bedSoulCost || 0)
   
-  if (!canAfford) {
+  if (!canAffordGold || !canAffordSouls) {
     return { action: 'upgrade_bed', score: 0, reason: 'Cannot afford bed upgrade' }
   }
   
@@ -432,15 +434,25 @@ export function executeRepairDoor(room: Room): BotActionResult {
 }
 
 export function executeUpgradeDoor(player: Player, room: Room): BotActionResult {
+  const soulCost = room.doorSoulCost || 0
   if (player.gold < room.doorUpgradeCost || room.doorLevel >= 10) {
     return { success: false, message: 'Cannot upgrade door' }
   }
+  if (soulCost > 0 && player.souls < soulCost) {
+    return { success: false, message: 'Not enough souls' }
+  }
   
   player.gold -= room.doorUpgradeCost
+  if (soulCost > 0) player.souls -= soulCost
+  
   room.doorLevel++
   room.doorMaxHp = Math.floor(room.doorMaxHp * 1.5)
   room.doorHp = room.doorMaxHp
-  room.doorUpgradeCost = Math.floor(room.doorUpgradeCost * GAME_CONSTANTS.DOOR_UPGRADE_COST_SCALE)
+  
+  // Calculate next upgrade cost
+  const nextLevel = room.doorLevel
+  room.doorUpgradeCost = Math.floor(40 * Math.pow(2, nextLevel - 1)) // Base 40g, doubles each level
+  room.doorSoulCost = nextLevel >= 4 ? Math.floor(215 * Math.pow(2, nextLevel - 4)) : 0 // 215 souls from level 5+
   
   return {
     success: true,
@@ -547,14 +559,24 @@ export function executeUpgradeATM(
 }
 
 export function executeUpgradeBed(player: Player, room: Room): BotActionResult {
+  const soulCost = room.bedSoulCost || 0
   if (player.gold < room.bedUpgradeCost) {
     return { success: false, message: 'Cannot afford bed upgrade' }
   }
+  if (soulCost > 0 && player.souls < soulCost) {
+    return { success: false, message: 'Not enough souls' }
+  }
   
   player.gold -= room.bedUpgradeCost
+  if (soulCost > 0) player.souls -= soulCost
+  
   room.bedLevel++
   room.bedIncome *= 2
-  room.bedUpgradeCost *= 2
+  
+  // Calculate next upgrade cost
+  const nextLevel = room.bedLevel
+  room.bedUpgradeCost = Math.floor(25 * Math.pow(2, nextLevel - 1)) // Base 25g, doubles each level
+  room.bedSoulCost = nextLevel >= 4 ? Math.floor(200 * Math.pow(2, nextLevel - 4)) : 0 // 200 souls from level 5+
   
   return {
     success: true,

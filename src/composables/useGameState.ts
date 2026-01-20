@@ -4,14 +4,15 @@
  */
 
 import { ref, computed, readonly } from 'vue'
-import type { DifficultyLevel, DifficultyConfig } from '../game/config/difficulty'
+import type { DifficultyLevel, DifficultyConfig } from '../game/config/difficulty.ts'
 import { 
   getDifficultyConfig, 
   DEFAULT_DIFFICULTY, 
   DIFFICULTY_LIST,
   generateHealingPointNests,
-  getSpawnZone
-} from '../game/config/difficulty'
+  getSpawnZone,
+  getEffectiveRoomCount
+} from '../game/config/difficulty.ts'
 
 // =============================================================================
 // STATE
@@ -19,6 +20,11 @@ import {
 
 const selectedDifficulty = ref<DifficultyLevel>(DEFAULT_DIFFICULTY)
 const currentConfig = ref<DifficultyConfig>(getDifficultyConfig(DEFAULT_DIFFICULTY))
+
+// =============================================================================
+// AVAILABLE DIFFICULTIES (full config objects for UI)
+// =============================================================================
+const availableDifficultyConfigs = DIFFICULTY_LIST.map(id => getDifficultyConfig(id))
 
 // =============================================================================
 // ACTIONS
@@ -46,7 +52,15 @@ function resetDifficulty(): void {
 const difficultyName = computed(() => currentConfig.value.name)
 const difficultyDescription = computed(() => currentConfig.value.description)
 
-const mapConfig = computed(() => currentConfig.value.map)
+const mapConfig = computed(() => {
+  const config = currentConfig.value.map
+  // Ensure room count is always > player count
+  const effectiveRoomCount = getEffectiveRoomCount(currentConfig.value)
+  return {
+    ...config,
+    roomCount: effectiveRoomCount
+  }
+})
 const monsterConfig = computed(() => currentConfig.value.monster)
 const playerConfig = computed(() => currentConfig.value.player)
 const economyConfig = computed(() => currentConfig.value.economy)
@@ -87,8 +101,8 @@ export function useGameState() {
     healingPointNests,
     spawnZone,
     
-    // Static data
-    availableDifficulties: DIFFICULTY_LIST,
+    // Static data - full config objects for UI display
+    availableDifficulties: availableDifficultyConfigs,
   }
 }
 

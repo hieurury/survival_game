@@ -28,15 +28,17 @@ export interface Room {
   doorHp: number
   doorMaxHp: number
   doorLevel: number
-  doorUpgradeCost: number // Cost to upgrade door (increases 20% each level)
+  doorUpgradeCost: number // Cost to upgrade door (gold, doubles each level)
+  doorSoulCost: number // Soul cost to upgrade door (from level 5+)
   doorRepairCooldown: number // Repair cooldown timer
   doorIsRepairing: boolean // Is door currently being repaired
-  doorRepairTimer: number // Current repair progress (0-7s)
+  doorRepairTimer: number // Current repair progress (0-5s)
   ownerId: number | null // player who owns this room
   roomType: 'normal' | 'armory' | 'storage' | 'bunker'
   bedPosition: Vector2 // position of bed in room
   bedLevel: number // bed level for gold generation
-  bedUpgradeCost: number // Cost to upgrade bed (doubles each level)
+  bedUpgradeCost: number // Cost to upgrade bed (gold, doubles each level)
+  bedSoulCost: number // Soul cost to upgrade bed (from level 5+)
   bedIncome: number // Current gold per second from bed
   buildSpots: Vector2[] // positions where buildings can be placed inside room
   doorPosition: Vector2 // position of the door in pixels
@@ -46,7 +48,7 @@ export interface Room {
 
 export interface DefenseBuilding {
   id: number
-  type: 'turret' | 'atm' | 'soul_collector' | 'vanguard' // 4 structure types
+  type: 'turret' | 'atm' | 'soul_collector' | 'vanguard' | 'smg' // 5 structure types
   level: number
   gridX: number
   gridY: number
@@ -62,8 +64,12 @@ export interface DefenseBuilding {
   animationFrame: number
   rotation: number
   upgradeCost: number // Current upgrade cost (doubles each level)
+  soulCost?: number // Soul cost for upgrade (from level 5+)
   goldRate?: number // For ATM - gold per second
   soulRate?: number // For Soul Collector - souls per second
+  burstCount?: number // For SMG - bullets per burst
+  burstIndex?: number // For SMG - current bullet in burst
+  burstCooldown?: number // For SMG - time between bullets in burst
 }
 
 export type EntityState = 'idle' | 'walking' | 'attacking' | 'dying' | 'healing' | 'sleeping'
@@ -112,6 +118,7 @@ export interface HealingPoint {
 }
 
 export interface Monster {
+  id: number
   hp: number
   maxHp: number
   damage: number
@@ -194,6 +201,7 @@ export interface Projectile {
   color: string
   size: number
   isHoming?: boolean // If true, tracks monster's current position
+  targetMonsterId?: number // ID of monster being targeted
 }
 
 export interface GameSettings {
@@ -223,24 +231,24 @@ export interface GameState {
 
 export const GAME_CONSTANTS = {
   // Map dimensions - LARGER map for more space
-  GRID_COLS: 50,
-  GRID_ROWS: 30,
+  GRID_COLS: 60,
+  GRID_ROWS: 44, // Extra 4 rows for bottom padding
   CELL_SIZE: 48, // cell size
-  WORLD_WIDTH: 2400, // 50 * 48
-  WORLD_HEIGHT: 1440, // 30 * 48
+  WORLD_WIDTH: 2880, // 60 * 48
+  WORLD_HEIGHT: 2112, // 44 * 48 (extra padding at bottom)
   
   // Central Spawn Zone (no building allowed here)
   SPAWN_ZONE: {
-    gridX: 21, // Center of 50-col map
-    gridY: 12, // Center of 30-row map
+    gridX: 26, // Center of 60-col map
+    gridY: 17, // Center of 40-row map
     width: 8,  // 8 cells wide
     height: 6, // 6 cells tall
   },
   
   // Monster Nest Zones (2 opposite corners for healing with mana system)
   MONSTER_NESTS: [
-    { gridX: 0, gridY: 0, width: 4, height: 4 },       // Top-left
-    { gridX: 46, gridY: 26, width: 4, height: 4 },     // Bottom-right
+    { gridX: 2, gridY: 2, width: 4, height: 4 },       // Top-left
+    { gridX: 54, gridY: 34, width: 4, height: 4 },     // Bottom-right
   ],
   
   // Healing Point Mana System
@@ -251,7 +259,8 @@ export const GAME_CONSTANTS = {
   // Viewport (what player sees) - optimized for mobile
   VIEWPORT_WIDTH: 960,
   VIEWPORT_HEIGHT: 540,
-  CAMERA_PADDING: 200, // Extra padding to view map edges/corners
+  CAMERA_PADDING: 400, // Extra padding to view map edges/corners
+  CAMERA_BOTTOM_PADDING: 200, // Extra bottom padding for UI elements
   
   // Game settings
   AI_COUNT: 4,
@@ -278,40 +287,52 @@ export const GAME_CONSTANTS = {
   MONSTER_TARGET_TIMEOUT: 30, // Max 30 seconds attacking same target
   
   // Rooms & Doors - NEW SCALING
-  BASE_DOOR_HP: 350, // Level 1 = 150 HP
+  BASE_DOOR_HP: 400, // Level 1 = 400 HP (DOOR_BALANCE.BASE_HP)
   DOOR_HP_SCALE: 1.5, // Each level = previous * 1.5
-  DOOR_UPGRADE_COST_SCALE: 2, // Cost increases 20% each level
-  DOOR_REPAIR_DURATION: 5, // Seconds to repair
+  DOOR_UPGRADE_COST_SCALE: 2, // Cost doubles each level
+  DOOR_REPAIR_DURATION: 5, // Seconds to repair (DOOR_BALANCE.REPAIR_DURATION)
   DOOR_REPAIR_COOLDOWN: 30, // Cooldown between repairs
-  DOOR_REPAIR_PERCENT: 0.35, // Heals 35% of max HP
+  DOOR_REPAIR_PERCENT: 0.45, // Heals 45% of max HP (DOOR_BALANCE.REPAIR_PERCENT)
   ROOMS_COUNT: 7, // 7 rooms now
   
   // Bed & Sleeping - DOUBLING GOLD/COST SCALING (NO WAKE UP)
   BED_BASE_INCOME: 1, // Base gold per second at level 1
-  BED_BASE_UPGRADE_COST: 40, // Initial upgrade cost (was 12)
+  BED_BASE_UPGRADE_COST: 25, // Initial upgrade cost (BED_BALANCE.BASE_UPGRADE_COST)
   BED_INTERACT_RANGE: 60,
   
   // Economy
   STARTING_GOLD: 20,
   GOLD_PER_SECOND: 0,
   
-  // Costs - 4 structure types now
+  // Costs - 5 structure types now
   COSTS: {
-    upgradeDoor: 20, // Base cost
+    upgradeDoor: 40, // Base cost (DOOR_BALANCE.BASE_UPGRADE_COST)
     turret: 10, // Turret cost in gold
     atm: 200, // ATM costs SOULS, not gold!
     soulCollector: 440, // Soul collector cost in gold
     vanguard: 150, // Vanguard cost in gold
+    smg: 100, // SMG (Súng tiểu liên) cost in gold
     moveRoom: 6,
   },
   
-  // Building stats - 4 types now
+  // Building stats - 5 types now
   STRUCTURE_BASE_HP: 50, // Default HP for all structures
   BUILDINGS: {
     turret: { hp: 50, damage: 10, range: 160, cooldown: 1.0, upgradeCost: 10 },
     atm: { hp: 50, damage: 0, range: 0, cooldown: 0, upgradeCost: 100, goldRate: 4 }, // 4 gold/s base, costs souls
     soul_collector: { hp: 50, damage: 0, range: 0, cooldown: 0, upgradeCost: 440, soulRate: 1 },
     vanguard: { hp: 200, damage: 0, range: 0, cooldown: 0, upgradeCost: 150 }, // Spawner building
+    smg: { hp: 50, damage: 5, range: 200, cooldown: 7.0, upgradeCost: 100, burstCount: 10 }, // SMG
+  },
+  
+  // SMG specific settings
+  SMG: {
+    BURST_COUNT: 10, // Bullets per burst
+    BURST_INTERVAL: 0.1, // Seconds between bullets in burst (100ms)
+    DAMAGE_SCALE: 1.1, // +10% damage per level
+    RANGE_SCALE: 1.2, // +20% range per level
+    SOUL_REQUIRED_LEVEL: 5, // Souls required from level 5
+    SOUL_COST: 200, // Soul cost starting at level 5
   },
   
   // ATM gold scaling: 4, 8, 16, 32, 64... per level (starts at 4)

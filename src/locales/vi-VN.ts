@@ -22,6 +22,7 @@ export const vi_VN = {
     atm: 'Máy ATM',
     soulCollector: 'Máy thu hồn',
     vanguard: 'Tiên phong',
+    smg: 'Súng tiểu liên',
     building: 'Công trình',
   },
 
@@ -45,6 +46,7 @@ export const vi_VN = {
     notEnoughGold: 'Không đủ vàng!',
     notEnoughGoldNeed: 'Không đủ vàng! Cần {cost}g',
     notEnoughSouls: 'Không đủ linh hồn! Cần {cost} linh hồn.',
+    notEnoughSoulsNeed: 'Không đủ linh hồn! Cần {souls} linh hồn.',
     builtInRoom: 'Đã xây {type} ở phòng {roomId}',
 
     // Bed upgrades
@@ -115,23 +117,26 @@ export const vi_VN = {
     doorDestroyedDesc: 'Cửa đã bị phá! Xây lại để khôi phục bảo vệ.',
     rebuildDoor: '🔨 Xây lại cửa ({cost}g) → Cấp 1',
     upgradeDoor: '⬆️ Nâng cấp ({cost}g) → +50% máu',
+    upgradeDoorWithSouls: '⬆️ Nâng cấp ({cost}g + {souls}👻) → +50% máu',
     maxLevel: '✅ Cấp tối đa!',
     repairCooldown: '🔧 Hồi chiêu: {time}giây',
     repairing: '🔧 Đang sửa...',
     fullHp: '✅ Đầy máu',
-    repairDoor: '🔧 Sửa (+20% máu trong 7 giây)',
+    repairDoor: '🔧 Sửa (+45% máu trong 5 giây)',
     cancel: 'Hủy',
 
     // Upgrade modal - Bed
     bed: '🛏️ Giường',
     goldPerSec: 'Vàng/giây: {rate}',
     upgradeBed: '⬆️ Nâng cấp ({cost}g) → {income}g/giây',
+    upgradeBedWithSouls: '⬆️ Nâng cấp ({cost}g + {souls}👻) → {income}g/giây',
 
     // Upgrade modal - Building
     turretTitle: '🔫 Tháp súng',
     atmTitle: '🏧 Máy ATM',
     soulCollectorTitle: '👻 Máy thu hồn',
     vanguardTitle: '⚔️ Tiên phong',
+    smgTitle: '🔫 Súng tiểu liên',
     upgradeBuilding: '⬆️ Nâng cấp ({cost}g',
     upgradeBuildingSouls: ' + {souls}👻)',
     sellBuilding: '💰 Bán ({refund}g)',
@@ -143,6 +148,8 @@ export const vi_VN = {
     atm: 'ATM',
     soul: 'Thu hồn',
     vanguard: 'Tiên phong',
+    smg: 'Tiểu liên',
+    smgDesc: 'Súng tiểu liên: Bắn 10 viên liên tiếp! Tầm xa 200, hồi chiêu 7 giây',
     vanguardDesc: 'Tiên phong: Tự động tấn công quái vật! 1 đơn vị cơ bản, +1 mỗi 2 cấp',
 
     // Game over
@@ -162,6 +169,7 @@ export const vi_VN = {
     atm: 'Máy ATM',
     soul_collector: 'Máy thu hồn',
     vanguard: 'Tiên phong',
+    smg: 'Súng tiểu liên',
   },
 
   // ============================================

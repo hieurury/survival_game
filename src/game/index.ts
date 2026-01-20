@@ -3,8 +3,11 @@
  * Central export point for the entire game engine
  */
 
-// Configuration
-export * from './config/constants'
+// Configuration - All config exports from unified config module
+export * from './config'
+
+// Entity System
+export * from './entities'
 
 // Re-export systems with explicit names to avoid conflicts
 export * from './systems/movementSystem'

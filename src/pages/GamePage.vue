@@ -14,7 +14,6 @@ import { GAME_CONSTANTS } from '../types/game'
 
 // Get difficulty configuration
 const { 
-  currentConfig,
   mapConfig, 
   monsterConfig, 
   playerConfig, 
@@ -23,10 +22,17 @@ const {
   timingConfig,
   healingPointNests,
   spawnZone,
-  worldWidth,
-  worldHeight,
-  difficultyName
 } = useGameState()
+
+// Building costs - using GAME_CONSTANTS with economy multiplier
+const buildingCosts = computed(() => ({
+  turret: Math.floor(GAME_CONSTANTS.COSTS.turret * economyConfig.value.buildingCostMultiplier),
+  atm: Math.floor(GAME_CONSTANTS.COSTS.atm * economyConfig.value.buildingCostMultiplier), // ATM costs souls
+  soulCollector: Math.floor(GAME_CONSTANTS.COSTS.soulCollector * economyConfig.value.buildingCostMultiplier),
+  vanguard: Math.floor(GAME_CONSTANTS.VANGUARD.GOLD_COST * economyConfig.value.buildingCostMultiplier),
+  smg: Math.floor(GAME_CONSTANTS.COSTS.smg * economyConfig.value.buildingCostMultiplier),
+  upgradeDoor: Math.floor(GAME_CONSTANTS.COSTS.upgradeDoor * economyConfig.value.upgradeCostMultiplier)
+}))
 
 const emit = defineEmits<{
   (e: 'back-home'): void
@@ -65,7 +71,8 @@ const goldAccumulator = reactive<{ [key: number]: number }>({}) // Tracks partia
 
 // Upgrade modal state
 const showUpgradeModal = ref(false)
-const upgradeTarget = ref<{ type: 'door' | 'bed' | 'building'; building?: typeof buildings[0]; room?: Room } | null>(null)
+const upgradeTarget = ref<{ type: 'door' | 'bed' | 'building'; building?: DefenseBuilding; room?: Room } | null>(null)
+const modalInteractive = ref(false) // Prevents accidental touches when modal opens
 
 // Camera/viewport with drag support
 const camera = reactive({ x: 0, y: 0 })
@@ -130,7 +137,7 @@ const initGrid = () => {
 // Rooms with beds and build spots
 const rooms = reactive<Room[]>([])
 
-// Generate random non-overlapping rooms
+// Generate non-overlapping rooms using zone-based placement
 const initRooms = () => {
   rooms.length = 0
   const config = mapConfig.value
@@ -140,30 +147,38 @@ const initRooms = () => {
   // Keep track of placed rooms to avoid overlap
   const placedRooms: { gridX: number; gridY: number; width: number; height: number }[] = []
   
-  // Room size ranges from difficulty config
-  const minWidth = config.roomMinWidth
-  const maxWidth = config.roomMaxWidth
-  const minHeight = config.roomMinHeight
-  const maxHeight = config.roomMaxHeight
+  // Room size from config
+  const roomWidth = config.roomMinWidth
+  const roomHeight = config.roomMinHeight
   
   // Room types
   const roomTypes: ('normal' | 'armory' | 'storage' | 'bunker')[] = ['normal', 'armory', 'storage', 'bunker']
-  const doorSides: ('top' | 'bottom' | 'left' | 'right')[] = ['top', 'bottom', 'left', 'right']
   
-  // Helper: check if area overlaps with spawn zone
+  // Map dimensions
+  const gridCols = config.gridCols
+  const gridRows = config.gridRows
+  const margin = 3 // Margin from map edges
+  const roomPadding = 3 // Space between rooms
+  
+  // Spawn zone (center of map)
+  const sz = spawnZone.value
+  
+  // Healing point nests
+  const nests = healingPointNests.value
+  
+  // Helper: check if area overlaps with spawn zone (with padding)
   const overlapsSpawnZone = (gx: number, gy: number, w: number, h: number): boolean => {
-    const sz = spawnZone.value
-    const padding = 1
+    const padding = 3
     return gx < sz.gridX + sz.width + padding &&
            gx + w + padding > sz.gridX &&
            gy < sz.gridY + sz.height + padding &&
            gy + h + padding > sz.gridY
   }
   
-  // Helper: check if area overlaps with monster nests
+  // Helper: check if area overlaps with monster nests (with padding)
   const overlapsMonsterNest = (gx: number, gy: number, w: number, h: number): boolean => {
-    const padding = 1
-    for (const nest of healingPointNests.value) {
+    const padding = 3
+    for (const nest of nests) {
       if (gx < nest.gridX + nest.width + padding &&
           gx + w + padding > nest.gridX &&
           gy < nest.gridY + nest.height + padding &&
@@ -174,173 +189,218 @@ const initRooms = () => {
     return false
   }
   
-  // Placement zones dynamically calculated based on map size
-  const gridCols = config.gridCols
-  const gridRows = config.gridRows
-  const zoneMargin = 5
-  const zoneMidX = Math.floor(gridCols / 2)
-  const zoneMidY = Math.floor(gridRows / 2)
+  // Helper: check if room is within map bounds
+  const isWithinBounds = (gx: number, gy: number, w: number, h: number): boolean => {
+    return gx >= margin && 
+           gy >= margin && 
+           gx + w <= gridCols - margin && 
+           gy + h <= gridRows - margin
+  }
   
-  const placementZones = [
-    { minX: zoneMargin, maxX: zoneMidX - 4, minY: zoneMargin, maxY: zoneMidY - 2 },
-    { minX: zoneMargin, maxX: zoneMidX - 4, minY: zoneMidY + 2, maxY: gridRows - zoneMargin },
-    { minX: zoneMidX + 4, maxX: gridCols - zoneMargin, minY: zoneMargin, maxY: zoneMidY - 2 },
-    { minX: zoneMidX + 4, maxX: gridCols - zoneMargin, minY: zoneMidY + 2, maxY: gridRows - zoneMargin },
-    { minX: 5, maxX: 18, minY: 10, maxY: 20 },     // Mid-left area
-    { minX: 32, maxX: 45, minY: 10, maxY: 20 },    // Mid-right area
-    { minX: 18, maxX: 32, minY: 19, maxY: 28 },    // Bottom-center (below spawn)
-  ]
-  
-  // Try to place rooms
-  const maxAttempts = 300
-  
-  for (let i = 0; i < numRooms; i++) {
-    let placed = false
-    const zone = placementZones[i % placementZones.length]!
-    
-    for (let attempt = 0; attempt < maxAttempts && !placed; attempt++) {
-      // Random size - LARGER rooms
-      const width = minWidth + Math.floor(Math.random() * (maxWidth - minWidth + 1))
-      const height = minHeight + Math.floor(Math.random() * (maxHeight - minHeight + 1))
-      
-      // Random position within zone (leave margin for corridors)
-      const zoneWidth = zone.maxX - zone.minX - width
-      const zoneHeight = zone.maxY - zone.minY - height
-      if (zoneWidth < 1 || zoneHeight < 1) continue
-      
-      const gridX = zone.minX + Math.floor(Math.random() * zoneWidth)
-      const gridY = zone.minY + Math.floor(Math.random() * zoneHeight)
-      
-      // Check overlap with spawn zone
-      if (overlapsSpawnZone(gridX, gridY, width, height)) continue
-      
-      // Check overlap with monster nests
-      if (overlapsMonsterNest(gridX, gridY, width, height)) continue
-      
-      // Check overlap with existing rooms (with 2 cell padding for corridors)
-      const padding = 2
-      let overlaps = false
-      for (const existing of placedRooms) {
-        if (
-          gridX < existing.gridX + existing.width + padding &&
-          gridX + width + padding > existing.gridX &&
-          gridY < existing.gridY + existing.height + padding &&
-          gridY + height + padding > existing.gridY
-        ) {
-          overlaps = true
-          break
-        }
-      }
-      
-      if (!overlaps) {
-        // Place room
-        const roomType = roomTypes[Math.floor(Math.random() * roomTypes.length)] ?? 'normal'
-        const doorSide = doorSides[Math.floor(Math.random() * doorSides.length)] ?? 'top'
-        
-        placedRooms.push({ gridX, gridY, width, height })
-        
-        // Calculate door position
-        let doorGridX: number = gridX + Math.floor(width / 2)
-        let doorGridY: number = gridY
-        switch (doorSide) {
-          case 'top':
-            doorGridX = gridX + Math.floor(width / 2)
-            doorGridY = gridY
-            break
-          case 'bottom':
-            doorGridX = gridX + Math.floor(width / 2)
-            doorGridY = gridY + height - 1
-            break
-          case 'left':
-            doorGridX = gridX
-            doorGridY = gridY + Math.floor(height / 2)
-            break
-          case 'right':
-            doorGridX = gridX + width - 1
-            doorGridY = gridY + Math.floor(height / 2)
-            break
-        }
-        
-        // Mark room cells on grid
-        for (let dy = 0; dy < height; dy++) {
-          for (let dx = 0; dx < width; dx++) {
-            const gx = gridX + dx
-            const gy = gridY + dy
-            
-            if (!grid[gy] || !grid[gy][gx]) continue
-            
-            const isDoorCell = gx === doorGridX && gy === doorGridY
-            const isEdge = dx === 0 || dx === width - 1 || dy === 0 || dy === height - 1
-            
-            if (isDoorCell) {
-              grid[gy][gx] = { x: gx, y: gy, type: 'door', roomId: i, walkable: true }
-            } else if (isEdge) {
-              grid[gy][gx] = { x: gx, y: gy, type: 'wall', roomId: i, walkable: false }
-            } else {
-              grid[gy][gx] = { x: gx, y: gy, type: 'room', roomId: i, walkable: true }
-            }
-          }
-        }
-        
-        // Room HP based on type
-        const typeMultiplier = roomType === 'bunker' ? 1.5 : roomType === 'armory' ? 1.2 : 1
-        const baseHp = Math.floor(GAME_CONSTANTS.BASE_DOOR_HP * typeMultiplier)
-        
-        // Bed position (center of room interior)
-        const interiorCenterX = gridX + Math.floor(width / 2)
-        const interiorCenterY = gridY + Math.floor(height / 2)
-        const bedX = interiorCenterX * cellSize + cellSize / 2
-        const bedY = interiorCenterY * cellSize + cellSize / 2
-        
-        // Build spots - all interior cells with minimum distance from bed
-        const buildSpots: Vector2[] = []
-        for (let dy = 1; dy < height - 1; dy++) {
-          for (let dx = 1; dx < width - 1; dx++) {
-            const spotX = (gridX + dx) * cellSize + cellSize / 2
-            const spotY = (gridY + dy) * cellSize + cellSize / 2
-            // Keep minimum distance from bed (1 cell = 48px)
-            if (Math.abs(spotX - bedX) > 40 || Math.abs(spotY - bedY) > 40) {
-              buildSpots.push({ x: spotX, y: spotY })
-            }
-          }
-        }
-        
-        // Door position in pixels
-        const doorX = doorGridX * cellSize + cellSize / 2
-        const doorY = doorGridY * cellSize + cellSize / 2
-        
-        rooms.push({
-          id: i,
-          gridX,
-          gridY,
-          width,
-          height,
-          centerX: (gridX + width / 2) * cellSize,
-          centerY: (gridY + height / 2) * cellSize,
-          doorHp: baseHp,
-          doorMaxHp: baseHp,
-          doorLevel: 1,
-          // Door upgrade cost is scaled by difficulty
-          doorUpgradeCost: Math.round(100 * economyConfig.value.upgradeCostMultiplier),
-          doorRepairCooldown: 0,
-          doorIsRepairing: false,
-          doorRepairTimer: 0,
-          ownerId: null,
-          roomType,
-          bedPosition: { x: bedX, y: bedY },
-          bedLevel: 1,
-          // Bed upgrade cost and income are scaled by difficulty
-          bedUpgradeCost: Math.round(50 * economyConfig.value.bedUpgradeCostScale),
-          bedIncome: economyConfig.value.bedBaseIncome,
-          buildSpots,
-          doorPosition: { x: doorX, y: doorY },
-          doorGridX,
-          doorGridY
-        })
-        
-        placed = true
+  // Helper: check if overlaps with existing rooms
+  const overlapsExistingRooms = (gx: number, gy: number, w: number, h: number): boolean => {
+    for (const existing of placedRooms) {
+      if (gx < existing.gridX + existing.width + roomPadding &&
+          gx + w + roomPadding > existing.gridX &&
+          gy < existing.gridY + existing.height + roomPadding &&
+          gy + h + roomPadding > existing.gridY) {
+        return true
       }
     }
+    return false
+  }
+  
+  // Helper: determine best door side based on room position
+  const getBestDoorSide = (gx: number, gy: number, w: number, h: number): 'top' | 'bottom' | 'left' | 'right' => {
+    const roomCenterX = gx + w / 2
+    const roomCenterY = gy + h / 2
+    const mapCenterX = gridCols / 2
+    const mapCenterY = gridRows / 2
+    
+    const dx = mapCenterX - roomCenterX
+    const dy = mapCenterY - roomCenterY
+    
+    if (Math.abs(dx) > Math.abs(dy)) {
+      return dx > 0 ? 'right' : 'left'
+    } else {
+      return dy > 0 ? 'bottom' : 'top'
+    }
+  }
+  
+  // Generate candidate positions in a grid pattern around spawn zone
+  const candidatePositions: { gridX: number; gridY: number }[] = []
+  
+  // Calculate available space
+  const availableWidth = gridCols - 2 * margin
+  const availableHeight = gridRows - 2 * margin
+  
+  // Create a grid of potential room positions
+  const stepX = roomWidth + roomPadding
+  const stepY = roomHeight + roomPadding
+  
+  for (let gy = margin; gy + roomHeight <= gridRows - margin; gy += stepY) {
+    for (let gx = margin; gx + roomWidth <= gridCols - margin; gx += stepX) {
+      // Skip if overlaps with spawn zone or nests
+      if (!overlapsSpawnZone(gx, gy, roomWidth, roomHeight) && 
+          !overlapsMonsterNest(gx, gy, roomWidth, roomHeight)) {
+        candidatePositions.push({ gridX: gx, gridY: gy })
+      }
+    }
+  }
+  
+  // Sort candidates by distance from spawn zone center (closer first for better distribution)
+  const spawnCenterX = sz.gridX + sz.width / 2
+  const spawnCenterY = sz.gridY + sz.height / 2
+  
+  candidatePositions.sort((a, b) => {
+    const distA = Math.sqrt(Math.pow(a.gridX + roomWidth/2 - spawnCenterX, 2) + Math.pow(a.gridY + roomHeight/2 - spawnCenterY, 2))
+    const distB = Math.sqrt(Math.pow(b.gridX + roomWidth/2 - spawnCenterX, 2) + Math.pow(b.gridY + roomHeight/2 - spawnCenterY, 2))
+    return distA - distB
+  })
+  
+  // Shuffle a bit to add variety while keeping general distribution
+  for (let i = 0; i < candidatePositions.length - 1; i++) {
+    if (Math.random() < 0.3) {
+      const j = Math.min(i + 1 + Math.floor(Math.random() * 3), candidatePositions.length - 1)
+      const temp = candidatePositions[i]!
+      candidatePositions[i] = candidatePositions[j]!
+      candidatePositions[j] = temp
+    }
+  }
+  
+  // Place rooms from candidates
+  let roomsPlaced = 0
+  for (const pos of candidatePositions) {
+    if (roomsPlaced >= numRooms) break
+    
+    const { gridX, gridY } = pos
+    const width = roomWidth
+    const height = roomHeight
+    
+    // Double check all conditions
+    if (!isWithinBounds(gridX, gridY, width, height)) continue
+    if (overlapsSpawnZone(gridX, gridY, width, height)) continue
+    if (overlapsMonsterNest(gridX, gridY, width, height)) continue
+    if (overlapsExistingRooms(gridX, gridY, width, height)) continue
+    
+    // Place room
+    const roomType = roomTypes[roomsPlaced % roomTypes.length] ?? 'normal'
+    const doorSide = getBestDoorSide(gridX, gridY, width, height)
+    
+    placedRooms.push({ gridX, gridY, width, height })
+    
+    // Calculate door position
+    let doorGridX: number = gridX + Math.floor(width / 2)
+    let doorGridY: number = gridY
+    switch (doorSide) {
+      case 'top':
+        doorGridX = gridX + Math.floor(width / 2)
+        doorGridY = gridY
+        break
+      case 'bottom':
+        doorGridX = gridX + Math.floor(width / 2)
+        doorGridY = gridY + height - 1
+        break
+      case 'left':
+        doorGridX = gridX
+        doorGridY = gridY + Math.floor(height / 2)
+        break
+      case 'right':
+        doorGridX = gridX + width - 1
+        doorGridY = gridY + Math.floor(height / 2)
+        break
+    }
+    
+    // Mark room cells on grid
+    for (let dy = 0; dy < height; dy++) {
+      for (let dx = 0; dx < width; dx++) {
+        const gx = gridX + dx
+        const gy = gridY + dy
+        
+        if (!grid[gy] || !grid[gy][gx]) continue
+        
+        const isDoorCell = gx === doorGridX && gy === doorGridY
+        const isEdge = dx === 0 || dx === width - 1 || dy === 0 || dy === height - 1
+        
+        if (isDoorCell) {
+          grid[gy][gx] = { x: gx, y: gy, type: 'door', roomId: roomsPlaced, walkable: true }
+        } else if (isEdge) {
+          grid[gy][gx] = { x: gx, y: gy, type: 'wall', roomId: roomsPlaced, walkable: false }
+        } else {
+          grid[gy][gx] = { x: gx, y: gy, type: 'room', roomId: roomsPlaced, walkable: true }
+        }
+      }
+    }
+    
+    // Room HP based on type
+    const typeMultiplier = roomType === 'bunker' ? 1.5 : roomType === 'armory' ? 1.2 : 1
+    const baseHp = Math.floor(GAME_CONSTANTS.BASE_DOOR_HP * typeMultiplier)
+    
+    // Bed position (center of room interior)
+    const interiorCenterX = gridX + Math.floor(width / 2)
+    const interiorCenterY = gridY + Math.floor(height / 2)
+    const bedX = interiorCenterX * cellSize + cellSize / 2
+    const bedY = interiorCenterY * cellSize + cellSize / 2
+    
+    // Build spots - all interior cells with minimum distance from bed
+    const buildSpots: Vector2[] = []
+    for (let dy = 1; dy < height - 1; dy++) {
+      for (let dx = 1; dx < width - 1; dx++) {
+        const spotX = (gridX + dx) * cellSize + cellSize / 2
+        const spotY = (gridY + dy) * cellSize + cellSize / 2
+        // Keep minimum distance from bed (1 cell = 48px)
+        if (Math.abs(spotX - bedX) > 40 || Math.abs(spotY - bedY) > 40) {
+          buildSpots.push({ x: spotX, y: spotY })
+        }
+      }
+    }
+    
+    // Door position in pixels
+    const doorX = doorGridX * cellSize + cellSize / 2
+    const doorY = doorGridY * cellSize + cellSize / 2
+    
+    rooms.push({
+      id: roomsPlaced,
+      gridX,
+      gridY,
+      width,
+      height,
+      centerX: (gridX + width / 2) * cellSize,
+      centerY: (gridY + height / 2) * cellSize,
+      doorHp: baseHp,
+      doorMaxHp: baseHp,
+      doorLevel: 1,
+      doorUpgradeCost: 40, // DOOR_BALANCE.BASE_UPGRADE_COST
+      doorSoulCost: 0, // No soul cost at level 1
+      doorRepairCooldown: 0,
+      doorIsRepairing: false,
+      doorRepairTimer: 0,
+      ownerId: null,
+      roomType,
+      bedPosition: { x: bedX, y: bedY },
+      bedLevel: 1,
+      bedUpgradeCost: 25, // BED_BALANCE.BASE_UPGRADE_COST
+      bedSoulCost: 0, // No soul cost at level 1
+      bedIncome: economyConfig.value.bedBaseIncome,
+      buildSpots,
+      doorPosition: { x: doorX, y: doorY },
+      doorGridX,
+      doorGridY
+    })
+    
+    roomsPlaced++
+  }
+  
+  // Log result
+  console.log(`Room placement: ${roomsPlaced}/${numRooms} rooms placed`)
+  if (roomsPlaced < numRooms) {
+    console.warn(`Could not place all rooms! Candidates available: ${candidatePositions.length}`)
+  }
+  
+  // Final validation: ensure we have enough rooms for players
+  const requiredRooms = playerConfig.value.totalCount
+  if (rooms.length < requiredRooms) {
+    console.error(`Not enough rooms! Generated: ${rooms.length}, Required: ${requiredRooms}`)
   }
 }
 
@@ -417,11 +477,12 @@ const getRandomNestPosition = (excludeIndex?: number): Vector2 => {
 const monsters = reactive<Monster[]>([])
 
 // Create a single monster with config
-const createMonster = (id: number, spawnPos: Vector2): Monster => {
+const createMonster = (monsterId: number, spawnPos: Vector2): Monster => {
   const mConfig = monsterConfig.value
   const cellSize = mapConfig.value.cellSize
   
   return {
+    id: monsterId,
     hp: mConfig.maxHp,
     maxHp: mConfig.maxHp,
     damage: mConfig.baseDamage,
@@ -467,8 +528,8 @@ const initMonsters = () => {
   }
 }
 
-// Legacy single monster reference for backward compatibility
-const monster = computed(() => monsters[0] || createMonster(0, getRandomNestPosition()))
+// Helper to get first monster (for backward compatibility in UI)
+const getFirstMonster = () => monsters[0]
 
 // Defense buildings
 const buildings = reactive<DefenseBuilding[]>([])
@@ -792,9 +853,7 @@ const handleTouchTap = (x: number, y: number) => {
         const distToDoor = distance(humanPlayer.value.position, clickedRoom.doorPosition)
         // Allow from anywhere when sleeping
         if (humanPlayer.value.isSleeping || distToDoor < GAME_CONSTANTS.CELL_SIZE * 4) {
-          upgradeTarget.value = { type: 'door', room: clickedRoom }
-          showUpgradeModal.value = true
-          playSfx('click')
+          openUpgradeModal({ type: 'door', room: clickedRoom })
           return
         }
       }
@@ -808,9 +867,7 @@ const handleTouchTap = (x: number, y: number) => {
         // Allow when sleeping OR close enough
         if (humanPlayer.value.isSleeping || playerDistToBed < GAME_CONSTANTS.BED_INTERACT_RANGE) {
           if (humanPlayer.value.isSleeping) {
-            upgradeTarget.value = { type: 'bed', room: myRoom }
-            showUpgradeModal.value = true
-            playSfx('click')
+            openUpgradeModal({ type: 'bed', room: myRoom })
             return
           } else {
             humanPlayer.value.isSleeping = true
@@ -835,9 +892,7 @@ const handleTouchTap = (x: number, y: number) => {
         if (distToBuilding < 35) {
           const playerDistToBuilding = distance(humanPlayer.value.position, bPos)
           if (playerDistToBuilding < GAME_CONSTANTS.CELL_SIZE * 3 || humanPlayer.value.isSleeping) {
-            upgradeTarget.value = { type: 'building', building }
-            showUpgradeModal.value = true
-            playSfx('click')
+            openUpgradeModal({ type: 'building', building })
             return
           }
         }
@@ -902,9 +957,7 @@ const handleCanvasClick = (e: MouseEvent) => {
         // Allow from anywhere when sleeping, otherwise check distance
         const distToDoor = distance(humanPlayer.value.position, clickedRoom.doorPosition)
         if (humanPlayer.value.isSleeping || distToDoor < GAME_CONSTANTS.CELL_SIZE * 4) {
-          upgradeTarget.value = { type: 'door', room: clickedRoom }
-          showUpgradeModal.value = true
-          playSfx('click')
+          openUpgradeModal({ type: 'door', room: clickedRoom })
           return
         }
         // If too far, do nothing (no auto-move)
@@ -922,9 +975,7 @@ const handleCanvasClick = (e: MouseEvent) => {
           // If sleeping, show upgrade modal. Otherwise start sleeping.
           if (humanPlayer.value.isSleeping) {
             // Show upgrade modal for bed
-            upgradeTarget.value = { type: 'bed', room: myRoom }
-            showUpgradeModal.value = true
-            playSfx('click')
+            openUpgradeModal({ type: 'bed', room: myRoom })
             return
           } else {
             // Start sleeping
@@ -952,9 +1003,7 @@ const handleCanvasClick = (e: MouseEvent) => {
           const playerDistToBuilding = distance(humanPlayer.value.position, bPos)
           if (playerDistToBuilding < GAME_CONSTANTS.CELL_SIZE * 3 || humanPlayer.value.isSleeping) {
             // Show upgrade modal for building (allow from anywhere when sleeping)
-            upgradeTarget.value = { type: 'building', building }
-            showUpgradeModal.value = true
-            playSfx('click')
+            openUpgradeModal({ type: 'building', building })
             return
           }
         }
@@ -1167,11 +1216,15 @@ const navigateToPlayer = (player: Player) => {
 // Navigate camera to monster's current position
 const navigateToMonster = () => {
   cameraManualMode.value = true
-  const targetX = monster.position.x - viewportWidth.value / 2
-  const targetY = monster.position.y - viewportHeight.value / 2
+  const m = getFirstMonster()
+  if (!m) return
+  const targetX = m.position.x - viewportWidth.value / 2
+  const targetY = m.position.y - viewportHeight.value / 2
   const pad = GAME_CONSTANTS.CAMERA_PADDING
-  camera.x = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_WIDTH - viewportWidth.value + pad, targetX))
-  camera.y = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight.value + pad, targetY))
+  const wWidth = mapConfig.value.gridCols * mapConfig.value.cellSize
+  const wHeight = mapConfig.value.gridRows * mapConfig.value.cellSize
+  camera.x = Math.max(-pad, Math.min(wWidth - viewportWidth.value + pad, targetX))
+  camera.y = Math.max(-pad, Math.min(wHeight - viewportHeight.value + pad, targetY))
 }
 
 // Build defense (only in rooms)
@@ -1226,8 +1279,13 @@ const buildDefense = (type: DefenseBuilding['type']) => {
     animationFrame: 0,
     rotation: 0,
     upgradeCost: stats.upgradeCost,
+    soulCost: 0, // No soul cost at level 1
     goldRate: 'goldRate' in stats ? stats.goldRate : undefined,
-    soulRate: 'soulRate' in stats ? stats.soulRate : undefined
+    soulRate: 'soulRate' in stats ? stats.soulRate : undefined,
+    // SMG specific
+    burstCount: type === 'smg' ? GAME_CONSTANTS.SMG.BURST_COUNT : undefined,
+    burstIndex: type === 'smg' ? 0 : undefined,
+    burstCooldown: type === 'smg' ? 0 : undefined,
   }
   
   buildings.push(building)
@@ -1316,22 +1374,39 @@ const upgradeBed = () => {
   const room = rooms.find(r => r.id === humanPlayer.value!.roomId)
   if (!room) return
   
+  // Check gold cost
   if (humanPlayer.value.gold < room.bedUpgradeCost) {
     addMessage(t('messages.notEnoughGoldNeed', { cost: room.bedUpgradeCost }))
     return
   }
   
+  // Check soul cost (from level 5+)
+  const soulCost = room.bedSoulCost || 0
+  if (soulCost > 0 && humanPlayer.value.souls < soulCost) {
+    addMessage(t('messages.notEnoughSoulsNeed', { souls: soulCost }))
+    return
+  }
+  
   humanPlayer.value.gold -= room.bedUpgradeCost
+  if (soulCost > 0) {
+    humanPlayer.value.souls -= soulCost
+  }
+  
   room.bedLevel++
   room.bedIncome = room.bedIncome * 2 // Double income
-  room.bedUpgradeCost = room.bedUpgradeCost * 2 // Double cost for next upgrade
+  
+  // Calculate next upgrade cost
+  const nextLevel = room.bedLevel
+  room.bedUpgradeCost = Math.floor(25 * Math.pow(2, nextLevel - 1)) // Base 25g, doubles each level
+  room.bedSoulCost = nextLevel >= 4 ? Math.floor(200 * Math.pow(2, nextLevel - 4)) : 0 // 200 souls from level 5+
+  
   playSfx('build')
   addMessage(t('messages.bedUpgraded', { level: room.bedLevel, income: room.bedIncome }))
   spawnFloatingText(room.bedPosition, `Bed LV${room.bedLevel}!`, '#fbbf24', 14)
   showUpgradeModal.value = false
 }
 
-// Upgrade door - increases HP by 50%, cost increases 20% each level
+// Upgrade door - increases HP by 50%, doubles cost each level
 const upgradeDoor = () => {
   if (!humanPlayer.value || humanPlayer.value.roomId === null) return
   const room = rooms.find(r => r.id === humanPlayer.value!.roomId)
@@ -1342,16 +1417,33 @@ const upgradeDoor = () => {
     return
   }
   
+  // Check gold cost
   if (humanPlayer.value.gold < room.doorUpgradeCost) {
     addMessage(t('messages.notEnoughGold'))
     return
   }
   
+  // Check soul cost (from level 5+)
+  const soulCost = room.doorSoulCost || 0
+  if (soulCost > 0 && humanPlayer.value.souls < soulCost) {
+    addMessage(t('messages.notEnoughSoulsNeed', { souls: soulCost }))
+    return
+  }
+  
   humanPlayer.value.gold -= room.doorUpgradeCost
+  if (soulCost > 0) {
+    humanPlayer.value.souls -= soulCost
+  }
+  
   room.doorLevel++
   room.doorMaxHp = Math.floor(room.doorMaxHp * 1.5) // +50% HP
   room.doorHp = room.doorMaxHp // Full heal on upgrade!
-  room.doorUpgradeCost = Math.floor(room.doorUpgradeCost * GAME_CONSTANTS.DOOR_UPGRADE_COST_SCALE) // +20% cost
+  
+  // Calculate next upgrade cost
+  const nextLevel = room.doorLevel
+  room.doorUpgradeCost = Math.floor(40 * Math.pow(2, nextLevel - 1)) // Base 40g, doubles each level
+  room.doorSoulCost = nextLevel >= 4 ? Math.floor(215 * Math.pow(2, nextLevel - 4)) : 0 // 215 souls from level 5+
+  
   playSfx('build')
   addMessage(t('messages.doorUpgraded', { level: room.doorLevel, hp: room.doorMaxHp }))
   spawnFloatingText(room.doorPosition, `Door LV${room.doorLevel}!`, '#60a5fa', 14)
@@ -1377,11 +1469,12 @@ const rebuildDoor = () => {
   
   humanPlayer.value.gold -= DOOR_REBUILD_COST
   
-  // Reset door to level 1
+  // Reset door to level 1 with new balance values
   room.doorLevel = 1
-  room.doorMaxHp = GAME_CONSTANTS.BASE_DOOR_HP
+  room.doorMaxHp = 400 // DOOR_BALANCE.BASE_HP
   room.doorHp = room.doorMaxHp
-  room.doorUpgradeCost = GAME_CONSTANTS.COSTS.upgradeDoor
+  room.doorUpgradeCost = 40 // DOOR_BALANCE.BASE_UPGRADE_COST
+  room.doorSoulCost = 0 // No soul cost at level 1
   room.doorRepairCooldown = 0
   room.doorIsRepairing = false
   room.doorRepairTimer = 0
@@ -1450,6 +1543,14 @@ const upgradeBuilding = () => {
   if (building.type === 'turret') {
     building.damage = Math.floor(building.baseDamage * Math.pow(1.1, building.level - 1))
     building.range = Math.floor(building.baseRange * Math.pow(1.2, building.level - 1))
+  } else if (building.type === 'smg') {
+    // SMG: +10% damage, +20% range (same as turret)
+    building.damage = Math.floor(building.baseDamage * Math.pow(1.1, building.level - 1))
+    building.range = Math.floor(building.baseRange * Math.pow(1.2, building.level - 1))
+    // SMG requires additional soul cost from level 5+
+    if (building.level >= GAME_CONSTANTS.SMG.SOUL_REQUIRED_LEVEL) {
+      building.soulCost = GAME_CONSTANTS.SMG.SOUL_COST
+    }
   } else if (building.type === 'atm') {
     // ATM: double gold rate
     building.goldRate = GAME_CONSTANTS.ATM_GOLD_LEVELS[Math.min(building.level - 1, 5)] || building.level
@@ -1501,10 +1602,24 @@ const sellBuilding = () => {
   showUpgradeModal.value = false
 }
 
+// Open upgrade modal with delay to prevent accidental touches
+const openUpgradeModal = (target: { type: 'door' | 'bed' | 'building'; building?: DefenseBuilding; room?: Room }) => {
+  upgradeTarget.value = target
+  modalInteractive.value = false // Disable interaction initially
+  showUpgradeModal.value = true
+  playSfx('click')
+  
+  // Enable interaction after a short delay (300ms) to prevent touch-through
+  setTimeout(() => {
+    modalInteractive.value = true
+  }, 300)
+}
+
 // Close upgrade modal
 const closeUpgradeModal = () => {
   showUpgradeModal.value = false
   upgradeTarget.value = null
+  modalInteractive.value = false
 }
 
 // AI select room - AI will go to a room and sleep (claiming via sleeping)
@@ -1603,381 +1718,380 @@ const enforceLatePlayerPenalty = () => {
 }
 
 // Monster AI - STATE-BASED SYSTEM with random targeting and 30s timeout
+// Refactored to support multiple monsters
 const updateMonsterAI = (deltaTime: number) => {
-  // Update attack cooldown
-  if (monster.attackCooldown > 0) {
-    monster.attackCooldown -= deltaTime
-  }
+  const mConfig = monsterConfig.value
+  const hConfig = healingPointConfig.value
+  const cellSize = mapConfig.value.cellSize
   
-  // Monster leveling - NEW FORMULA: 30s + 10s × current level
-  const levelUpTime = GAME_CONSTANTS.MONSTER_BASE_LEVEL_TIME + (GAME_CONSTANTS.MONSTER_LEVEL_TIME_INCREMENT * monster.level)
-  monster.levelTimer += deltaTime
-  if (monster.levelTimer >= levelUpTime) {
-    monster.levelTimer = 0
-    monster.level++
-    // +10% damage and +10% HP per level
-    monster.damage = Math.floor(monster.baseDamage * Math.pow(GAME_CONSTANTS.MONSTER_DAMAGE_SCALE, monster.level - 1))
-    monster.maxHp = Math.floor(GAME_CONSTANTS.MONSTER_MAX_HP * Math.pow(GAME_CONSTANTS.MONSTER_HP_SCALE, monster.level - 1))
-    monster.hp = monster.maxHp // FULL HEAL on level up!
-    addMessage(t('messages.monsterSpawned', { level: monster.level, damage: monster.damage, hp: monster.maxHp }))
-    spawnFloatingText(monster.position, `LV ${monster.level}!`, '#ff6b6b', 20)
-  }
-  
-  // Find nearest monster nest with sufficient mana for healing
-  // Returns null if no healing point has enough mana (>=10% capacity)
-  const findNearestHealingPoint = (): HealingPoint | null => {
-    const minMana = GAME_CONSTANTS.HEALING_POINT_MAX_MANA * GAME_CONSTANTS.HEALING_POINT_MIN_MANA_PERCENT
-    const availablePoints = healingPoints.filter(hp => hp.manaPower >= minMana)
-    
-    if (availablePoints.length === 0) return null
-    
-    let nearest = availablePoints[0]!
-    let nearestDist = distance(monster.position, nearest.position)
-    
-    for (const hp of availablePoints) {
-      const d = distance(monster.position, hp.position)
-      if (d < nearestDist) {
-        nearestDist = d
-        nearest = hp
-      }
+  for (const monster of monsters) {
+    // Update attack cooldown
+    if (monster.attackCooldown > 0) {
+      monster.attackCooldown -= deltaTime
     }
-    return nearest
-  }
-  
-  // Get healing point monster is currently at (within range)
-  const getHealingPointAtMonster = (): HealingPoint | null => {
-    for (const hp of healingPoints) {
-      if (distance(monster.position, hp.position) < 100) {
-        return hp
-      }
+    
+    // Monster leveling - config driven
+    const levelUpTime = mConfig.baseLevelTime + (mConfig.levelTimeIncrement * monster.level)
+    monster.levelTimer += deltaTime
+    if (monster.levelTimer >= levelUpTime) {
+      monster.levelTimer = 0
+      monster.level++
+      // Scaling by config
+      monster.damage = Math.floor(monster.baseDamage * Math.pow(mConfig.damageScale, monster.level - 1))
+      monster.maxHp = Math.floor(mConfig.maxHp * Math.pow(mConfig.hpScale, monster.level - 1))
+      monster.hp = monster.maxHp // FULL HEAL on level up!
+      addMessage(t('messages.monsterSpawned', { level: monster.level, damage: monster.damage, hp: monster.maxHp }))
+      spawnFloatingText(monster.position, `LV ${monster.level}!`, '#ff6b6b', 20)
     }
-    return null
-  }
-  
-  // =========================================================================
-  // HEALING WITH MANA SYSTEM: Healing consumes mana, immediate re-engage
-  // No more 5-second idle delay - monster attacks immediately when healed
-  // =========================================================================
-  
-  // STATE: RETREAT - when HP is low, go to nearest nest with mana
-  if (monster.hp / monster.maxHp < GAME_CONSTANTS.MONSTER_HEAL_THRESHOLD || monster.isFullyHealing) {
-    monster.monsterState = 'retreat'
     
-    const targetHealingPoint = findNearestHealingPoint()
-    
-    // If no healing point has sufficient mana, stop retreating and resume combat
-    if (!targetHealingPoint) {
-      if (monster.isFullyHealing || monster.isRetreating) {
-        addMessage(t('messages.healingPointsExhausted'))
-        spawnFloatingText(monster.position, '⚡ No Mana!', '#ef4444', 14)
-      }
-      monster.isFullyHealing = false
-      monster.isRetreating = false
-      monster.speed = monster.baseSpeed
-      monster.monsterState = 're-engage'
-      // Continue to normal target selection below
-    } else {
-      // Set retreat state if not already retreating
-      if (!monster.isRetreating && !monster.isFullyHealing) {
-        monster.isRetreating = true
-        monster.isFullyHealing = true
-        monster.healIdleTimer = 0
-        monster.speed = monster.baseSpeed * GAME_CONSTANTS.MONSTER_RETREAT_SPEED_BONUS
-        monster.targetPlayerId = null
-        monster.targetTimer = 0
-        addMessage(t('messages.monsterRetreating'))
-      }
-      
-      const distToHeal = distance(monster.position, targetHealingPoint.position)
-      
-      if (distToHeal > 50) {
-        // Walking to nest
-        if (monster.path.length === 0 || monster.state !== 'walking') {
-          const walkableGrid = createWalkableGrid(-1, true)
-          monster.path = findPath(walkableGrid, monster.position, targetHealingPoint.position, GAME_CONSTANTS.CELL_SIZE)
-          monster.state = 'walking'
-          monster.targetPosition = targetHealingPoint.position
+    // Find nearest monster nest with sufficient mana for healing
+    const minMana = hConfig.maxMana * hConfig.minManaPercent
+    const findNearestHealingPoint = (): HealingPoint | null => {
+      const availablePoints = healingPoints.filter(hp => hp.manaPower >= minMana)
+      if (availablePoints.length === 0) return null
+      let nearest = availablePoints[0]!
+      let nearestDist = distance(monster.position, nearest.position)
+      for (const hp of availablePoints) {
+        const d = distance(monster.position, hp.position)
+        if (d < nearestDist) {
+          nearestDist = d
+          nearest = hp
         }
+      }
+      return nearest
+    }
+    
+    // Get healing point monster is currently at (within range)
+    const getHealingPointAtMonster = (): HealingPoint | null => {
+      for (const hp of healingPoints) {
+        if (distance(monster.position, hp.position) < 100) {
+          return hp
+        }
+      }
+      return null
+    }
+    
+    // =========================================================================
+    // HEALING WITH MANA SYSTEM: Healing consumes mana, immediate re-engage
+    // =========================================================================
+    
+    // STATE: RETREAT - when HP is low, go to nearest nest with mana
+    if (monster.hp / monster.maxHp < mConfig.healThreshold || monster.isFullyHealing) {
+      monster.monsterState = 'retreat'
+      
+      const targetHealingPoint = findNearestHealingPoint()
+      
+      // If no healing point has sufficient mana, stop retreating and resume combat
+      if (!targetHealingPoint) {
+        if (monster.isFullyHealing || monster.isRetreating) {
+          addMessage(t('messages.healingPointsExhausted'))
+          spawnFloatingText(monster.position, '⚡ No Mana!', '#ef4444', 14)
+        }
+        monster.isFullyHealing = false
+        monster.isRetreating = false
+        monster.speed = monster.baseSpeed
+        monster.monsterState = 're-engage'
       } else {
-        // STATE: HEAL - regenerate at nest, consuming mana
-        const currentHealPoint = getHealingPointAtMonster()
+        // Set retreat state if not already retreating
+        if (!monster.isRetreating && !monster.isFullyHealing) {
+          monster.isRetreating = true
+          monster.isFullyHealing = true
+          monster.healIdleTimer = 0
+          monster.speed = monster.baseSpeed * mConfig.retreatSpeedBonus
+          monster.targetPlayerId = null
+          monster.targetTimer = 0
+          addMessage(t('messages.monsterRetreating'))
+        }
         
-        if (currentHealPoint) {
-          const minMana = GAME_CONSTANTS.HEALING_POINT_MAX_MANA * GAME_CONSTANTS.HEALING_POINT_MIN_MANA_PERCENT
+        const distToHeal = distance(monster.position, targetHealingPoint.position)
+        
+        if (distToHeal > 50) {
+          // Walking to nest
+          if (monster.path.length === 0 || monster.state !== 'walking') {
+            const walkableGrid = createWalkableGrid(-1, true)
+            monster.path = findPath(walkableGrid, monster.position, targetHealingPoint.position, cellSize)
+            monster.state = 'walking'
+            monster.targetPosition = targetHealingPoint.position
+          }
+        } else {
+          // STATE: HEAL - regenerate at nest, consuming mana
+          const currentHealPoint = getHealingPointAtMonster()
           
-          // Check if current healing point has enough mana to continue healing
-          if (currentHealPoint.manaPower < minMana) {
-            // Mana depleted - leave immediately and resume combat
-            spawnFloatingText(monster.position, '⚡ Out of Mana!', '#fbbf24', 14)
-            monster.isFullyHealing = false
-            monster.isRetreating = false
-            monster.speed = monster.baseSpeed
-            monster.monsterState = 're-engage'
-            addMessage(t('messages.healingPointDepleted'))
-          } else {
-            // Heal using mana - mana cost equals HP restored
-            monster.monsterState = 'heal'
-            monster.state = 'healing'
-            monster.path = []
-            
-            // Calculate heal amount (20% max HP per second)
-            const potentialHeal = monster.maxHp * GAME_CONSTANTS.MONSTER_HEAL_RATE * deltaTime
-            const hpNeeded = monster.maxHp - monster.hp
-            const healAmount = Math.min(potentialHeal, hpNeeded, currentHealPoint.manaPower)
-            
-            // Apply healing and consume mana
-            monster.hp += healAmount
-            currentHealPoint.manaPower -= healAmount
-            
-            // Show mana consumption
-            if (Math.random() < 0.1) {
-              const manaPercent = Math.round((currentHealPoint.manaPower / currentHealPoint.maxManaPower) * 100)
-              spawnFloatingText(currentHealPoint.position, `💧 ${manaPercent}%`, '#60a5fa', 10)
-            }
-            
-            spawnParticles(monster.position, 'heal', 1, '#22c55e')
-            
-            // Check if fully healed - IMMEDIATELY resume hunting (no idle delay)
-            if (monster.hp >= monster.maxHp) {
-              monster.hp = monster.maxHp
+          if (currentHealPoint) {
+            // Check if current healing point has enough mana to continue healing
+            if (currentHealPoint.manaPower < minMana) {
+              // Mana depleted - leave immediately and resume combat
+              spawnFloatingText(monster.position, '⚡ Out of Mana!', '#fbbf24', 14)
               monster.isFullyHealing = false
               monster.isRetreating = false
               monster.speed = monster.baseSpeed
-              monster.targetPlayerId = null
               monster.monsterState = 're-engage'
-              addMessage(t('messages.monsterFullyHealed'))
-              spawnFloatingText(monster.position, '💪 Full HP!', '#22c55e', 14)
+              addMessage(t('messages.healingPointDepleted'))
+            } else {
+              // Heal using mana - mana cost equals HP restored
+              monster.monsterState = 'heal'
+              monster.state = 'healing'
+              monster.path = []
+              
+              // Calculate heal amount using config
+              const potentialHeal = monster.maxHp * mConfig.healRate * deltaTime
+              const hpNeeded = monster.maxHp - monster.hp
+              const healAmount = Math.min(potentialHeal, hpNeeded, currentHealPoint.manaPower)
+              
+              // Apply healing and consume mana
+              monster.hp += healAmount
+              currentHealPoint.manaPower -= healAmount
+              
+              // Show mana consumption
+              if (Math.random() < 0.1) {
+                const manaPercent = Math.round((currentHealPoint.manaPower / currentHealPoint.maxManaPower) * 100)
+                spawnFloatingText(currentHealPoint.position, `💧 ${manaPercent}%`, '#60a5fa', 10)
+              }
+              
+              spawnParticles(monster.position, 'heal', 1, '#22c55e')
+              
+              // Check if fully healed - IMMEDIATELY resume hunting (no idle delay)
+              if (monster.hp >= monster.maxHp) {
+                monster.hp = monster.maxHp
+                monster.isFullyHealing = false
+                monster.isRetreating = false
+                monster.speed = monster.baseSpeed
+                monster.targetPlayerId = null
+                monster.monsterState = 're-engage'
+                addMessage(t('messages.monsterFullyHealed'))
+                spawnFloatingText(monster.position, '💪 Full HP!', '#22c55e', 14)
+              }
             }
+          } else {
+            // Not at a valid healing point despite being close - find new one
+            monster.path = []
           }
-        } else {
-          // Not at a valid healing point despite being close - find new one
-          monster.path = []
         }
+        continue // Skip to next monster
       }
-      return
     }
-  }
-  
-  // Reset retreat state if HP is above threshold
-  monster.isRetreating = false
-  monster.speed = monster.baseSpeed
-  
-  // Track target timer (30s max per target)
-  if (monster.targetPlayerId !== null) {
-    monster.targetTimer += deltaTime
     
-    // DISENGAGE after 30 seconds on same target
-    if (monster.targetTimer >= GAME_CONSTANTS.MONSTER_TARGET_TIMEOUT) {
-      addMessage(t('messages.monsterDisengaging'))
-      // Add current target to last targets list
-      if (!monster.lastTargets.includes(monster.targetPlayerId)) {
-        monster.lastTargets.push(monster.targetPlayerId)
-        // Keep only last 2 targets to avoid
-        if (monster.lastTargets.length > 2) {
-          monster.lastTargets.shift()
-        }
-      }
-      monster.targetPlayerId = null
-      monster.targetTimer = 0
-      monster.monsterState = 'disengage'
-    }
-  }
-  
-  // RANDOM TARGET SELECTION (avoiding recent targets)
-  const selectRandomTarget = (): Player | null => {
-    const alivePlayers = players.filter(p => p.alive && !monster.lastTargets.includes(p.id))
-    if (alivePlayers.length === 0) {
-      // If all recent targets dead or no other options, allow re-targeting
-      const allAlive = players.filter(p => p.alive)
-      if (allAlive.length === 0) return null
-      return allAlive[Math.floor(Math.random() * allAlive.length)] || null
-    }
-    return alivePlayers[Math.floor(Math.random() * alivePlayers.length)] || null
-  }
-  
-  // =========================================================================
-  // VANGUARD PRIORITY: Monster attacks vanguards that hit it first!
-  // =========================================================================
-  if (monster.targetVanguardId !== null) {
-    const targetVanguard = vanguards.find(v => v.id === monster.targetVanguardId && v.state !== 'dead')
+    // Reset retreat state if HP is above threshold
+    monster.isRetreating = false
+    monster.speed = monster.baseSpeed
     
-    if (targetVanguard) {
-      const distToVanguard = distance(monster.position, targetVanguard.position)
+    // Track target timer (30s max per target) - config driven
+    if (monster.targetPlayerId !== null) {
+      monster.targetTimer += deltaTime
       
-      // Attack vanguard in range
-      if (distToVanguard < GAME_CONSTANTS.MONSTER_ATTACK_RANGE) {
-        monster.state = 'attacking'
-        monster.path = []
-        monster.facingRight = targetVanguard.position.x > monster.position.x
-        
-        if (monster.attackCooldown <= 0) {
-          targetVanguard.hp -= monster.damage
-          monster.attackCooldown = GAME_CONSTANTS.MONSTER_ATTACK_SPEED
-          playSfx('hit')
-          spawnParticles(targetVanguard.position, 'blood', 8, '#a855f7')
-          spawnFloatingText(targetVanguard.position, `-${monster.damage}`, '#ef4444', 14)
-          
-          if (targetVanguard.hp <= 0) {
-            targetVanguard.hp = 0
-            targetVanguard.state = 'dead'
-            targetVanguard.respawnTimer = GAME_CONSTANTS.VANGUARD.RESPAWN_TIME
-            spawnFloatingText(targetVanguard.position, '💀 Vanguard Down!', '#ef4444', 14)
-            monster.targetVanguardId = null // Clear vanguard target
+      // DISENGAGE after timeout
+      if (monster.targetTimer >= mConfig.targetTimeout) {
+        addMessage(t('messages.monsterDisengaging'))
+        // Add current target to last targets list
+        if (!monster.lastTargets.includes(monster.targetPlayerId)) {
+          monster.lastTargets.push(monster.targetPlayerId)
+          // Keep only last 2 targets to avoid
+          if (monster.lastTargets.length > 2) {
+            monster.lastTargets.shift()
           }
         }
-        return
-      } else {
-        // Chase the vanguard
-        monster.state = 'walking'
-        const walkableGrid = createWalkableGrid(-1, true)
-        if (monster.path.length === 0 || Math.random() < 0.05) {
-          monster.path = findPath(walkableGrid, monster.position, targetVanguard.position, GAME_CONSTANTS.CELL_SIZE)
-        }
-        
-        if (monster.path.length > 0) {
-          const nextPos = monster.path[0]!
-          monster.facingRight = nextPos.x > monster.position.x
-          monster.position = moveTowards(monster.position, nextPos, monster.speed, deltaTime)
-          if (distance(monster.position, nextPos) < 5) {
-            monster.path.shift()
-          }
-        }
-        return
-      }
-    } else {
-      // Target vanguard died or not found
-      monster.targetVanguardId = null
-    }
-  }
-  
-  // STATE: SEARCH - find a new target
-  if (monster.targetPlayerId === null || monster.monsterState === 'search' || monster.monsterState === 're-engage' || monster.monsterState === 'disengage') {
-    const newTarget = selectRandomTarget()
-    if (newTarget) {
-      monster.targetPlayerId = newTarget.id
-      monster.targetTimer = 0
-      monster.monsterState = 'attack'
-      addMessage(t('messages.monsterTargeting', { name: newTarget.name }))
-    } else {
-      monster.state = 'idle'
-      monster.monsterState = 'search'
-      return
-    }
-  }
-  
-  // Get current target
-  const targetPlayer = players.find(p => p.id === monster.targetPlayerId && p.alive)
-  if (!targetPlayer) {
-    // Target died or invalid - clear and search again
-    monster.targetPlayerId = null
-    monster.targetTimer = 0
-    monster.monsterState = 'search'
-    return
-  }
-  
-  // STATE: ATTACK - pursue and attack the target
-  monster.monsterState = 'attack'
-  const distToTarget = distance(monster.position, targetPlayer.position)
-  
-  // Check if monster can directly attack this player
-  if (distToTarget < GAME_CONSTANTS.MONSTER_ATTACK_RANGE) {
-    monster.state = 'attacking'
-    monster.path = []
-    if (monster.attackCooldown <= 0) {
-      targetPlayer.hp -= monster.damage
-      monster.attackCooldown = GAME_CONSTANTS.MONSTER_ATTACK_SPEED
-      playSfx('hit')
-      spawnParticles(targetPlayer.position, 'blood', 10, '#ef4444')
-      spawnFloatingText(targetPlayer.position, `-${monster.damage}`, '#ef4444', 18)
-      
-      if (targetPlayer.hp <= 0) {
-        targetPlayer.hp = 0
-        targetPlayer.alive = false
-        targetPlayer.state = 'dying'
-        addMessage(t('messages.playerKilled', { name: targetPlayer.name }))
         monster.targetPlayerId = null
         monster.targetTimer = 0
-        if (targetPlayer.isHuman) endGame(false)
+        monster.monsterState = 'disengage'
       }
     }
-    return
-  }
-  
-  // Check if we need to break through a door to reach the player
-  const playerRoom = targetPlayer.roomId !== null ? rooms.find(r => r.id === targetPlayer.roomId) : null
-  
-  // OBSTACLE DESTRUCTION: Check if any building blocks the path to target
-  const obstacleInRange = buildings.find(b => {
-    if (b.hp <= 0) return false
-    const bPos = gridToWorld({ x: b.gridX, y: b.gridY }, GAME_CONSTANTS.CELL_SIZE)
-    const distToBuilding = distance(monster.position, bPos)
-    return distToBuilding < GAME_CONSTANTS.CELL_SIZE * 1.5
-  })
-  
-  if (obstacleInRange) {
-    const bPos = gridToWorld({ x: obstacleInRange.gridX, y: obstacleInRange.gridY }, GAME_CONSTANTS.CELL_SIZE)
-    monster.state = 'attacking'
-    monster.path = []
-    monster.facingRight = bPos.x > monster.position.x
     
-    if (monster.attackCooldown <= 0) {
-      obstacleInRange.hp -= monster.damage
-      monster.attackCooldown = GAME_CONSTANTS.MONSTER_ATTACK_SPEED
-      playSfx('hit')
-      spawnParticles(bPos, 'spark', 8, '#ff9900')
-      spawnFloatingText(bPos, `-${monster.damage}`, '#ef4444', 14)
+    // RANDOM TARGET SELECTION (avoiding recent targets)
+    const selectRandomTarget = (): Player | null => {
+      const alivePlayers = players.filter(p => p.alive && !monster.lastTargets.includes(p.id))
+      if (alivePlayers.length === 0) {
+        // If all recent targets dead or no other options, allow re-targeting
+        const allAlive = players.filter(p => p.alive)
+        if (allAlive.length === 0) return null
+        return allAlive[Math.floor(Math.random() * allAlive.length)] || null
+      }
+      return alivePlayers[Math.floor(Math.random() * alivePlayers.length)] || null
+    }
+    
+    // =========================================================================
+    // VANGUARD PRIORITY: Monster attacks vanguards that hit it first!
+    // =========================================================================
+    if (monster.targetVanguardId !== null) {
+      const targetVanguard = vanguards.find(v => v.id === monster.targetVanguardId && v.state !== 'dead')
       
-      if (obstacleInRange.hp <= 0) {
-        obstacleInRange.hp = 0
-        addMessage(t('messages.monsterDestroyedBuilding', { type: getBuildingTypeName(obstacleInRange.type) }))
-        spawnFloatingText(bPos, '💥', '#ff6b6b', 18)
-        spawnParticles(bPos, 'explosion', 15, '#ff6b6b')
+      if (targetVanguard) {
+        const distToVanguard = distance(monster.position, targetVanguard.position)
+        
+        // Attack vanguard in range
+        if (distToVanguard < mConfig.attackRange) {
+          monster.state = 'attacking'
+          monster.path = []
+          monster.facingRight = targetVanguard.position.x > monster.position.x
+          
+          if (monster.attackCooldown <= 0) {
+            targetVanguard.hp -= monster.damage
+            monster.attackCooldown = mConfig.attackCooldown
+            playSfx('hit')
+            spawnParticles(targetVanguard.position, 'blood', 8, '#a855f7')
+            spawnFloatingText(targetVanguard.position, `-${monster.damage}`, '#ef4444', 14)
+            
+            if (targetVanguard.hp <= 0) {
+              targetVanguard.hp = 0
+              targetVanguard.state = 'dead'
+              targetVanguard.respawnTimer = timingConfig.value.vanguardRespawnTime
+              spawnFloatingText(targetVanguard.position, '💀 Vanguard Down!', '#ef4444', 14)
+              monster.targetVanguardId = null // Clear vanguard target
+            }
+          }
+          continue
+        } else {
+          // Chase the vanguard
+          monster.state = 'walking'
+          const walkableGrid = createWalkableGrid(-1, true)
+          if (monster.path.length === 0 || Math.random() < 0.05) {
+            monster.path = findPath(walkableGrid, monster.position, targetVanguard.position, cellSize)
+          }
+          
+          if (monster.path.length > 0) {
+            const nextPos = monster.path[0]!
+            monster.facingRight = nextPos.x > monster.position.x
+            monster.position = moveTowards(monster.position, nextPos, monster.speed, deltaTime)
+            if (distance(monster.position, nextPos) < 5) {
+              monster.path.shift()
+            }
+          }
+          continue
+        }
+      } else {
+        // Target vanguard died or not found
+        monster.targetVanguardId = null
       }
     }
-    return
-  }
-
-  if (playerRoom && playerRoom.doorHp > 0) {
-    const doorPos = playerRoom.doorPosition
-    const distToDoor = distance(monster.position, doorPos)
     
-    if (distToDoor < GAME_CONSTANTS.CELL_SIZE * 1.2) {
+    // STATE: SEARCH - find a new target
+    if (monster.targetPlayerId === null || monster.monsterState === 'search' || monster.monsterState === 're-engage' || monster.monsterState === 'disengage') {
+      const newTarget = selectRandomTarget()
+      if (newTarget) {
+        monster.targetPlayerId = newTarget.id
+        monster.targetTimer = 0
+        monster.monsterState = 'attack'
+        addMessage(t('messages.monsterTargeting', { name: newTarget.name }))
+      } else {
+        monster.state = 'idle'
+        monster.monsterState = 'search'
+        continue
+      }
+    }
+    
+    // Get current target
+    const targetPlayer = players.find(p => p.id === monster.targetPlayerId && p.alive)
+    if (!targetPlayer) {
+      // Target died or invalid - clear and search again
+      monster.targetPlayerId = null
+      monster.targetTimer = 0
+      monster.monsterState = 'search'
+      continue
+    }
+    
+    // STATE: ATTACK - pursue and attack the target
+    monster.monsterState = 'attack'
+    const distToTarget = distance(monster.position, targetPlayer.position)
+    
+    // Check if monster can directly attack this player
+    if (distToTarget < mConfig.attackRange) {
       monster.state = 'attacking'
       monster.path = []
       if (monster.attackCooldown <= 0) {
-        const doorDamage = Math.floor(monster.damage * 1.5)
-        playerRoom.doorHp -= doorDamage
-        monster.attackCooldown = GAME_CONSTANTS.MONSTER_ATTACK_SPEED
+        targetPlayer.hp -= monster.damage
+        monster.attackCooldown = mConfig.attackCooldown
         playSfx('hit')
-        spawnParticles(doorPos, 'spark', 10, '#fbbf24')
-        spawnFloatingText(doorPos, `-${doorDamage}`, '#ef4444', 16)
+        spawnParticles(targetPlayer.position, 'blood', 10, '#ef4444')
+        spawnFloatingText(targetPlayer.position, `-${monster.damage}`, '#ef4444', 18)
         
-        if (playerRoom.doorHp <= 0) {
-          playerRoom.doorHp = 0
-          addMessage(t('messages.roomDoorDestroyed', { roomId: playerRoom.id }))
-          spawnFloatingText(doorPos, '💥 DESTROYED!', '#ff6b6b', 20)
+        if (targetPlayer.hp <= 0) {
+          targetPlayer.hp = 0
+          targetPlayer.alive = false
+          targetPlayer.state = 'dying'
+          addMessage(t('messages.playerKilled', { name: targetPlayer.name }))
+          monster.targetPlayerId = null
+          monster.targetTimer = 0
+          if (targetPlayer.isHuman) endGame(false)
+        }
+      }
+      continue
+    }
+    
+    // Check if we need to break through a door to reach the player
+    const playerRoom = targetPlayer.roomId !== null ? rooms.find(r => r.id === targetPlayer.roomId) : null
+    
+    // OBSTACLE DESTRUCTION: Check if any building blocks the path to target
+    const obstacleInRange = buildings.find(b => {
+      if (b.hp <= 0) return false
+      const bPos = gridToWorld({ x: b.gridX, y: b.gridY }, cellSize)
+      const distToBuilding = distance(monster.position, bPos)
+      return distToBuilding < cellSize * 1.5
+    })
+    
+    if (obstacleInRange) {
+      const bPos = gridToWorld({ x: obstacleInRange.gridX, y: obstacleInRange.gridY }, cellSize)
+      monster.state = 'attacking'
+      monster.path = []
+      monster.facingRight = bPos.x > monster.position.x
+      
+      if (monster.attackCooldown <= 0) {
+        obstacleInRange.hp -= monster.damage
+        monster.attackCooldown = mConfig.attackCooldown
+        playSfx('hit')
+        spawnParticles(bPos, 'spark', 8, '#ff9900')
+        spawnFloatingText(bPos, `-${monster.damage}`, '#ef4444', 14)
+        
+        if (obstacleInRange.hp <= 0) {
+          obstacleInRange.hp = 0
+          addMessage(t('messages.monsterDestroyedBuilding', { type: getBuildingTypeName(obstacleInRange.type) }))
+          spawnFloatingText(bPos, '💥', '#ff6b6b', 18)
+          spawnParticles(bPos, 'explosion', 15, '#ff6b6b')
+        }
+      }
+      continue
+    }
+
+    if (playerRoom && playerRoom.doorHp > 0) {
+      const doorPos = playerRoom.doorPosition
+      const distToDoor = distance(monster.position, doorPos)
+      
+      if (distToDoor < cellSize * 1.2) {
+        monster.state = 'attacking'
+        monster.path = []
+        if (monster.attackCooldown <= 0) {
+          const doorDamage = Math.floor(monster.damage * 1.5)
+          playerRoom.doorHp -= doorDamage
+          monster.attackCooldown = mConfig.attackCooldown
+          playSfx('hit')
+          spawnParticles(doorPos, 'spark', 10, '#fbbf24')
+          spawnFloatingText(doorPos, `-${doorDamage}`, '#ef4444', 16)
+          
+          if (playerRoom.doorHp <= 0) {
+            playerRoom.doorHp = 0
+            addMessage(t('messages.roomDoorDestroyed', { roomId: playerRoom.id }))
+            spawnFloatingText(doorPos, '💥 DESTROYED!', '#ff6b6b', 20)
+          }
+        }
+      } else {
+        if (monster.state !== 'walking' || monster.path.length === 0) {
+          const walkableGrid = createWalkableGrid(-1, true)
+          monster.path = findPath(walkableGrid, monster.position, doorPos, cellSize)
+          if (monster.path.length > 0) {
+            monster.state = 'walking'
+            monster.targetPosition = doorPos
+          }
         }
       }
     } else {
+      // Player is accessible - move towards player
       if (monster.state !== 'walking' || monster.path.length === 0) {
         const walkableGrid = createWalkableGrid(-1, true)
-        monster.path = findPath(walkableGrid, monster.position, doorPos, GAME_CONSTANTS.CELL_SIZE)
+        monster.path = findPath(walkableGrid, monster.position, targetPlayer.position, cellSize)
         if (monster.path.length > 0) {
           monster.state = 'walking'
-          monster.targetPosition = doorPos
+          monster.targetPosition = targetPlayer.position
+        } else {
+          monster.state = 'idle'
         }
-      }
-    }
-  } else {
-    // Player is accessible - move towards player
-    if (monster.state !== 'walking' || monster.path.length === 0) {
-      const walkableGrid = createWalkableGrid(-1, true)
-      monster.path = findPath(walkableGrid, monster.position, targetPlayer.position, GAME_CONSTANTS.CELL_SIZE)
-      if (monster.path.length > 0) {
-        monster.state = 'walking'
-        monster.targetPosition = targetPlayer.position
-      } else {
-        monster.state = 'idle'
       }
     }
   }
@@ -2000,10 +2114,11 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     const myATMs = myBuildings.filter(b => b.type === 'atm')
     const mySoulCollectors = myBuildings.filter(b => b.type === 'soul_collector')
     
-    // Calculate threat level
+    // Calculate threat level based on multiple monsters
     const doorHpPercent = myRoom.doorHp / myRoom.doorMaxHp
-    const monsterTargetingMe = monster.targetPlayerId === player.id
-    const monsterLevel = monster.level
+    const firstMonster = getFirstMonster()
+    const monsterTargetingMe = monsters.some(m => m.targetPlayerId === player.id)
+    const monsterLevel = firstMonster?.level ?? 1 // Use highest level if multiple monsters
     const isUnderAttack = monsterTargetingMe && doorHpPercent < 1
     
     // Threat assessment
@@ -2017,11 +2132,12 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     const maxTurretLevel = myTurrets.length > 0 ? Math.max(...myTurrets.map(t => t.level)) : 0
     
     // Find empty build spot - PRIORITIZE spots closer to door for turrets
+    const cellSize = mapConfig.value.cellSize
     const findEmptySpot = (prioritizeNearDoor: boolean = false): Vector2 | null => {
       const emptySpots = myRoom.buildSpots.filter(spot => {
         return !buildings.some(b => {
           if (b.hp <= 0) return false // Destroyed buildings don't block
-          const bPos = gridToWorld({ x: b.gridX, y: b.gridY }, GAME_CONSTANTS.CELL_SIZE)
+          const bPos = gridToWorld({ x: b.gridX, y: b.gridY }, cellSize)
           return distance(bPos, spot) < 30
         })
       })
@@ -2045,7 +2161,7 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
       const emptySpots = myRoom.buildSpots.filter(spot => {
         return !buildings.some(b => {
           if (b.hp <= 0) return false
-          const bPos = gridToWorld({ x: b.gridX, y: b.gridY }, GAME_CONSTANTS.CELL_SIZE)
+          const bPos = gridToWorld({ x: b.gridX, y: b.gridY }, cellSize)
           return distance(bPos, spot) < 30
         })
       })
@@ -2068,7 +2184,7 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
         
         // Bonus: Not too close to existing turrets (spread fire)
         const nearbyTurrets = myTurrets.filter(t => {
-          const tPos = gridToWorld({ x: t.gridX, y: t.gridY }, GAME_CONSTANTS.CELL_SIZE)
+          const tPos = gridToWorld({ x: t.gridX, y: t.gridY }, cellSize)
           return distance(spot, tPos) < 80
         })
         if (nearbyTurrets.length === 0) {
@@ -2545,36 +2661,54 @@ const updateVanguardAI = (deltaTime: number) => {
     // Attack cooldown
     unit.attackCooldown -= deltaTime
     
-    // Find nearest monster
-    const distToMonster = distance(unit.position, monster.position)
-    const monsterAlive = monster.hp > 0
+    // Find nearest alive monster
+    const findNearestMonster = (): Monster | null => {
+      const aliveMonsters = monsters.filter(m => m.hp > 0)
+      if (aliveMonsters.length === 0) return null
+      let nearest = aliveMonsters[0]!
+      let nearestDist = distance(unit.position, nearest.position)
+      for (const m of aliveMonsters) {
+        const d = distance(unit.position, m.position)
+        if (d < nearestDist) {
+          nearestDist = d
+          nearest = m
+        }
+      }
+      return nearest
+    }
+    
+    const targetMonster = findNearestMonster()
+    const distToMonster = targetMonster ? distance(unit.position, targetMonster.position) : Infinity
+    const monsterAlive = targetMonster !== null && targetMonster.hp > 0
     
     // STATE: CHASING/ATTACKING - pursue monster (increased detection range)
     const effectiveDetectionRange = VANGUARD.DETECTION_RANGE * 2 // Double detection range for better engagement
     
-    if (monsterAlive && distToMonster < effectiveDetectionRange) {
+    if (monsterAlive && targetMonster && distToMonster < effectiveDetectionRange) {
       unit.targetMonsterId = true
       
       // In attack range
       if (distToMonster < VANGUARD.ATTACK_RANGE) {
         unit.state = 'attacking'
         unit.path = []
-        unit.facingRight = monster.position.x > unit.position.x
+        unit.facingRight = targetMonster.position.x > unit.position.x
         
         if (unit.attackCooldown <= 0) {
           // Attack monster!
-          monster.hp -= unit.damage
+          targetMonster.hp -= unit.damage
           unit.attackCooldown = VANGUARD.ATTACK_COOLDOWN
           
           // Monster reacts - prioritize this vanguard
-          monster.targetVanguardId = unit.id
+          targetMonster.targetVanguardId = unit.id
           
           playSfx('hit')
-          spawnParticles(monster.position, 'blood', 6, '#a855f7')
-          spawnFloatingText(monster.position, `-${unit.damage}`, '#a855f7', 12)
+          spawnParticles(targetMonster.position, 'blood', 6, '#a855f7')
+          spawnFloatingText(targetMonster.position, `-${unit.damage}`, '#a855f7', 12)
           
-          if (monster.hp <= 0) {
-            endGame(true)
+          if (targetMonster.hp <= 0) {
+            // Check if all monsters dead
+            const allDead = monsters.every(m => m.hp <= 0)
+            if (allDead) endGame(true)
           }
         }
       } else {
@@ -2586,15 +2720,15 @@ const updateVanguardAI = (deltaTime: number) => {
         // 2. Monster moved significantly (> 100px from last target)
         // 3. Every 0.5 seconds for path refresh
         const shouldRecalcPath = unit.path.length === 0 || 
-          (unit.targetPosition && distance(monster.position, unit.targetPosition) > 100)
+          (unit.targetPosition && distance(targetMonster.position, unit.targetPosition) > 100)
         
         if (shouldRecalcPath) {
           const walkableGrid = createWalkableGrid(-1, false, true) // isVanguard=true
-          const newPath = findPath(walkableGrid, unit.position, monster.position, GAME_CONSTANTS.CELL_SIZE)
+          const newPath = findPath(walkableGrid, unit.position, targetMonster.position, mapConfig.value.cellSize)
           
           if (newPath.length > 0) {
             unit.path = newPath
-            unit.targetPosition = { ...monster.position }
+            unit.targetPosition = { ...targetMonster.position }
           }
         }
         
@@ -2611,10 +2745,10 @@ const updateVanguardAI = (deltaTime: number) => {
           }
         } else {
           // Direct movement if no path found - always move toward monster
-          const newPosition = moveTowards(unit.position, monster.position, unit.speed, deltaTime)
+          const newPosition = moveTowards(unit.position, targetMonster.position, unit.speed, deltaTime)
           unit.position.x = newPosition.x
           unit.position.y = newPosition.y
-          unit.facingRight = monster.position.x > unit.position.x
+          unit.facingRight = targetMonster.position.x > unit.position.x
         }
       }
     } else {
@@ -2684,34 +2818,79 @@ const updateHealingPoints = (deltaTime: number) => {
 
 // Update buildings
 const updateBuildings = (deltaTime: number) => {
+  const cellSize = mapConfig.value.cellSize
+  
   buildings.forEach(building => {
     if (building.hp <= 0) return
-    if (building.type !== 'turret') return  // Only turrets shoot
+    if (building.type !== 'turret' && building.type !== 'smg') return  // Only turrets and SMG shoot
     
     building.currentCooldown -= deltaTime
+    if (building.type === 'smg' && building.burstCooldown !== undefined) {
+      building.burstCooldown -= deltaTime
+    }
     building.animationFrame += deltaTime * 8
     
-    const buildingPos = gridToWorld({ x: building.gridX, y: building.gridY }, GAME_CONSTANTS.CELL_SIZE)
+    const buildingPos = gridToWorld({ x: building.gridX, y: building.gridY }, cellSize)
     // Calculate actual damage and range based on level
     const actualDamage = getBuildingDamage(building.baseDamage, building.level)
     const actualRange = getBuildingRange(building.baseRange, building.level)
-    const distToMonster = distance(buildingPos, monster.position)
     
-    if (distToMonster < actualRange && monster.hp > 0) {
-      const dx = monster.position.x - buildingPos.x
-      const dy = monster.position.y - buildingPos.y
+    // Find nearest alive monster in range
+    let targetMonster: Monster | null = null
+    let minDist = Infinity
+    for (const m of monsters) {
+      if (m.hp <= 0) continue
+      const d = distance(buildingPos, m.position)
+      if (d < actualRange && d < minDist) {
+        minDist = d
+        targetMonster = m
+      }
+    }
+    
+    if (targetMonster) {
+      const dx = targetMonster.position.x - buildingPos.x
+      const dy = targetMonster.position.y - buildingPos.y
       building.rotation = Math.atan2(dy, dx)
       
-      if (building.currentCooldown <= 0) {
+      // SMG burst fire logic
+      if (building.type === 'smg') {
+        // If we have bullets left in burst and burst cooldown is ready
+        if (building.burstIndex !== undefined && building.burstIndex > 0 && building.burstCooldown !== undefined && building.burstCooldown <= 0) {
+          // Fire one bullet from burst
+          projectiles.push({
+            position: { ...buildingPos },
+            target: { ...targetMonster.position },
+            speed: 600,
+            damage: actualDamage,
+            ownerId: building.ownerId,
+            color: '#f59e0b', // Orange for SMG
+            size: 4,
+            isHoming: true,
+            targetMonsterId: targetMonster.id
+          })
+          building.burstIndex--
+          building.burstCooldown = GAME_CONSTANTS.SMG.BURST_INTERVAL
+          playSfx('attack')
+        }
+        // Start new burst when cooldown is ready and no burst in progress
+        else if (building.currentCooldown <= 0 && building.burstIndex === 0) {
+          building.burstIndex = building.burstCount || GAME_CONSTANTS.SMG.BURST_COUNT
+          building.burstCooldown = 0 // Fire immediately
+          building.currentCooldown = building.cooldown
+        }
+      }
+      // Normal turret fire
+      else if (building.currentCooldown <= 0) {
         projectiles.push({
           position: { ...buildingPos },
-          target: { ...monster.position },
+          target: { ...targetMonster.position },
           speed: 500,
           damage: actualDamage,
           ownerId: building.ownerId,
           color: '#3b82f6',
           size: 5,
-          isHoming: true // Homing projectile - tracks monster
+          isHoming: true, // Homing projectile - tracks monster
+          targetMonsterId: targetMonster.id // Track which monster to target
         })
         building.currentCooldown = building.cooldown
         playSfx('attack')
@@ -2726,22 +2905,42 @@ const updateProjectiles = (deltaTime: number) => {
     const proj = projectiles[i]
     if (!proj) continue
     
+    // Find target monster - use targetMonsterId if set, otherwise first alive monster
+    const targetMonster = proj.targetMonsterId !== undefined
+      ? monsters.find(m => m.id === proj.targetMonsterId)
+      : monsters.find(m => m.hp > 0)
+    
     // Homing projectiles track the monster's current position
-    if (proj.isHoming && monster.hp > 0) {
-      proj.target.x = monster.position.x
-      proj.target.y = monster.position.y
+    if (proj.isHoming && targetMonster && targetMonster.hp > 0) {
+      proj.target.x = targetMonster.position.x
+      proj.target.y = targetMonster.position.y
     }
     
     const moved = moveTowards(proj.position, proj.target, proj.speed, deltaTime)
     proj.position.x = moved.x
     proj.position.y = moved.y
     
-    if (distance(proj.position, monster.position) < 40) {
-      monster.hp -= proj.damage
+    // Check hit against all monsters
+    let hitMonster: Monster | null = null
+    for (const m of monsters) {
+      if (m.hp <= 0) continue
+      if (distance(proj.position, m.position) < 40) {
+        hitMonster = m
+        break
+      }
+    }
+    
+    if (hitMonster) {
+      hitMonster.hp -= proj.damage
       spawnParticles(proj.position, 'explosion', 8, proj.color)
       spawnFloatingText(proj.position, `-${proj.damage}`, '#3b82f6', 14)
       projectiles.splice(i, 1)
-      if (monster.hp <= 0) endGame(true)
+      
+      // Check if all monsters dead
+      if (hitMonster.hp <= 0) {
+        const allDead = monsters.every(m => m.hp <= 0)
+        if (allDead) endGame(true)
+      }
       continue
     }
     
@@ -3005,7 +3204,10 @@ const gameLoop = (timestamp: number) => {
     
     // Monster only active after countdown ends
     if (monsterActive.value) {
-      if (monster.state === 'walking') moveAlongPath(monster, deltaTime)
+      // Move all walking monsters
+      for (const monster of monsters) {
+        if (monster.state === 'walking') moveAlongPath(monster, deltaTime)
+      }
       updateMonsterAI(deltaTime)
     }
     
@@ -3148,7 +3350,7 @@ const render = () => {
   }
   
   // Draw spawn zone border
-  const sz = GAME_CONSTANTS.SPAWN_ZONE
+  const sz = spawnZone.value
   const szPx = sz.gridX * cellSize
   const szPy = sz.gridY * cellSize
   const szWidth = sz.width * cellSize
@@ -3377,7 +3579,8 @@ const render = () => {
       turret: '#3b82f6', 
       atm: '#22c55e', 
       soul_collector: '#a855f7',
-      vanguard: '#6366f1'
+      vanguard: '#6366f1',
+      smg: '#f97316'
     }
     ctx.fillStyle = colors[building.type] || '#888'
     
@@ -3433,6 +3636,60 @@ const render = () => {
       ctx.fillStyle = '#fbbf24'
       ctx.font = 'bold 10px Arial'
       ctx.fillText(`${aliveUnits}/${unitCount}`, 0, 14)
+    } else if (building.type === 'smg') {
+      // SMG - Multi-barrel gun turret (orange themed)
+      // Outer glow ring
+      ctx.strokeStyle = '#f97316'
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.arc(0, 0, 18, 0, Math.PI * 2)
+      ctx.stroke()
+      
+      // Base platform - dark orange/brown
+      ctx.fillStyle = '#78350f'
+      ctx.beginPath()
+      ctx.arc(0, 0, 16, 0, Math.PI * 2)
+      ctx.fill()
+      
+      // Inner ring - orange
+      ctx.fillStyle = '#ea580c'
+      ctx.beginPath()
+      ctx.arc(0, 0, 11, 0, Math.PI * 2)
+      ctx.fill()
+      
+      // Rotate barrels toward target
+      ctx.save()
+      ctx.rotate(building.rotation || 0)
+      
+      // Barrel housing - dark box
+      ctx.fillStyle = '#292524'
+      ctx.fillRect(0, -8, 20, 16)
+      
+      // 3 barrel tubes - orange
+      ctx.fillStyle = '#f97316'
+      ctx.fillRect(4, -6, 18, 3)   // Top barrel
+      ctx.fillRect(4, -1.5, 18, 3) // Middle barrel
+      ctx.fillRect(4, 3, 18, 3)    // Bottom barrel
+      
+      // Barrel tips - bright yellow/orange glow
+      ctx.fillStyle = '#fcd34d'
+      ctx.beginPath()
+      ctx.arc(22, -4.5, 2.5, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.beginPath()
+      ctx.arc(22, 0, 2.5, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.beginPath()
+      ctx.arc(22, 4.5, 2.5, 0, Math.PI * 2)
+      ctx.fill()
+      
+      ctx.restore()
+      
+      // Center core - bright orange
+      ctx.fillStyle = '#fb923c'
+      ctx.beginPath()
+      ctx.arc(0, 0, 5, 0, Math.PI * 2)
+      ctx.fill()
     }
     
     ctx.restore()
@@ -3647,96 +3904,98 @@ const render = () => {
     ctx.fillRect(x - 20, y - 35, 40 * hpPercent, 8)
   })
   
-  // Draw monster
-  if (ctx && monster.hp > 0) {
-    const { x, y } = monster.position
-    
-    // Shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.6)'
-    ctx.beginPath()
-    ctx.ellipse(x, y + 30, 32, 16, 0, 0, Math.PI * 2)
-    ctx.fill()
-    
-    const bounce = monster.state === 'walking' ? Math.sin(monster.animationFrame * Math.PI / 2) * 5 : 0
-    
-    ctx.save()
-    ctx.translate(x, y + bounce)
-    if (!monster.facingRight) ctx.scale(-1, 1)
-    
-    // Body
-    ctx.fillStyle = monster.isRetreating ? '#581c87' : '#7c3aed'
-    ctx.beginPath()
-    ctx.ellipse(0, 0, 35, 45, 0, 0, Math.PI * 2)
-    ctx.fill()
-    
-    // Horns
-    ctx.fillStyle = '#44403c'
-    ctx.beginPath()
-    ctx.moveTo(-18, -32)
-    ctx.lineTo(-12, -55)
-    ctx.lineTo(-6, -32)
-    ctx.fill()
-    ctx.beginPath()
-    ctx.moveTo(6, -32)
-    ctx.lineTo(12, -55)
-    ctx.lineTo(18, -32)
-    ctx.fill()
-    
-    // Eyes
-    ctx.fillStyle = '#ef4444'
-    ctx.shadowColor = '#ef4444'
-    ctx.shadowBlur = 15
-    ctx.beginPath()
-    ctx.arc(-12, -12, 7, 0, Math.PI * 2)
-    ctx.arc(12, -12, 7, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.shadowBlur = 0
-    
-    // Healing effect
-    if (monster.state === 'healing') {
-      ctx.strokeStyle = '#22c55e'
-      ctx.lineWidth = 4
+  // Draw monsters
+  for (const monster of monsters) {
+    if (ctx && monster.hp > 0) {
+      const { x, y } = monster.position
+      
+      // Shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.6)'
       ctx.beginPath()
-      ctx.arc(0, 0, 50 + Math.sin(Date.now() / 150) * 8, 0, Math.PI * 2)
-      ctx.stroke()
-    }
-    
-    // Attack effect
-    if (monster.state === 'attacking') {
-      ctx.strokeStyle = '#ef4444'
-      ctx.lineWidth = 4
+      ctx.ellipse(x, y + 30, 32, 16, 0, 0, Math.PI * 2)
+      ctx.fill()
+      
+      const bounce = monster.state === 'walking' ? Math.sin(monster.animationFrame * Math.PI / 2) * 5 : 0
+      
+      ctx.save()
+      ctx.translate(x, y + bounce)
+      if (!monster.facingRight) ctx.scale(-1, 1)
+      
+      // Body
+      ctx.fillStyle = monster.isRetreating ? '#581c87' : '#7c3aed'
       ctx.beginPath()
-      ctx.moveTo(25, 0)
-      ctx.lineTo(50, -5)
-      ctx.stroke()
+      ctx.ellipse(0, 0, 35, 45, 0, 0, Math.PI * 2)
+      ctx.fill()
+      
+      // Horns
+      ctx.fillStyle = '#44403c'
+      ctx.beginPath()
+      ctx.moveTo(-18, -32)
+      ctx.lineTo(-12, -55)
+      ctx.lineTo(-6, -32)
+      ctx.fill()
+      ctx.beginPath()
+      ctx.moveTo(6, -32)
+      ctx.lineTo(12, -55)
+      ctx.lineTo(18, -32)
+      ctx.fill()
+      
+      // Eyes
+      ctx.fillStyle = '#ef4444'
+      ctx.shadowColor = '#ef4444'
+      ctx.shadowBlur = 15
+      ctx.beginPath()
+      ctx.arc(-12, -12, 7, 0, Math.PI * 2)
+      ctx.arc(12, -12, 7, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.shadowBlur = 0
+      
+      // Healing effect
+      if (monster.state === 'healing') {
+        ctx.strokeStyle = '#22c55e'
+        ctx.lineWidth = 4
+        ctx.beginPath()
+        ctx.arc(0, 0, 50 + Math.sin(Date.now() / 150) * 8, 0, Math.PI * 2)
+        ctx.stroke()
+      }
+      
+      // Attack effect
+      if (monster.state === 'attacking') {
+        ctx.strokeStyle = '#ef4444'
+        ctx.lineWidth = 4
+        ctx.beginPath()
+        ctx.moveTo(25, 0)
+        ctx.lineTo(50, -5)
+        ctx.stroke()
+      }
+      
+      ctx.restore()
+      
+      // HP bar
+      const hpPercent = monster.hp / monster.maxHp
+      ctx.fillStyle = '#222'
+      ctx.fillRect(x - 40, y - 65, 80, 12)
+      ctx.fillStyle = hpPercent > 0.5 ? '#a855f7' : hpPercent > 0.2 ? '#eab308' : '#ef4444'
+      ctx.fillRect(x - 40, y - 65, 80 * hpPercent, 12)
+      ctx.strokeStyle = '#444'
+      ctx.lineWidth = 1
+      ctx.strokeRect(x - 40, y - 65, 80, 12)
+      
+      // Monster level badge
+      ctx.fillStyle = '#7c3aed'
+      ctx.beginPath()
+      ctx.arc(x + 50, y - 60, 14, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.fillStyle = '#fff'
+      ctx.font = 'bold 12px Arial'
+      ctx.textAlign = 'center'
+      ctx.fillText(`${monster.level}`, x + 50, y - 56)
+      
+      ctx.fillStyle = '#fff'
+      ctx.font = '10px Arial'
+      ctx.textAlign = 'center'
+      ctx.fillText(`${Math.floor(monster.hp)}/${monster.maxHp}`, x, y - 75)
     }
-    
-    ctx.restore()
-    
-    // HP bar
-    const hpPercent = monster.hp / monster.maxHp
-    ctx.fillStyle = '#222'
-    ctx.fillRect(x - 40, y - 65, 80, 12)
-    ctx.fillStyle = hpPercent > 0.5 ? '#a855f7' : hpPercent > 0.2 ? '#eab308' : '#ef4444'
-    ctx.fillRect(x - 40, y - 65, 80 * hpPercent, 12)
-    ctx.strokeStyle = '#444'
-    ctx.lineWidth = 1
-    ctx.strokeRect(x - 40, y - 65, 80, 12)
-    
-    // Monster level badge
-    ctx.fillStyle = '#7c3aed'
-    ctx.beginPath()
-    ctx.arc(x + 50, y - 60, 14, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.fillStyle = '#fff'
-    ctx.font = 'bold 12px Arial'
-    ctx.textAlign = 'center'
-    ctx.fillText(`${monster.level}`, x + 50, y - 56)
-    
-    ctx.fillStyle = '#fff'
-    ctx.font = '10px Arial'
-    ctx.textAlign = 'center'
-    ctx.fillText(`${Math.floor(monster.hp)}/${monster.maxHp}`, x, y - 75)
   }
   
   // Draw projectiles
@@ -3917,6 +4176,8 @@ onMounted(() => {
       initGrid()
       initRooms()
       initPlayers()
+      initHealingPoints() // Initialize healing points for monster
+      initMonsters() // Initialize monsters based on difficulty
       initAudio()
       startBgm()
       lastTime = performance.now()
@@ -3953,8 +4214,8 @@ onUnmounted(() => {
           <span v-if="!monsterActive" class="font-bold text-amber-400">{{ t('ui.spawnsIn', { time: Math.ceil(countdown) }) }}</span>
           <span v-else class="font-bold text-red-400">{{ t('ui.monsterActive') }}</span>
         </div>
-        <div class="rounded-lg bg-red-900/40 px-3 py-1 text-xs">
-          👹 <span class="font-bold text-red-400">LV{{ monster.level }} {{ Math.floor(monster.hp) }}/{{ monster.maxHp }}</span>
+        <div v-if="getFirstMonster()" class="rounded-lg bg-red-900/40 px-3 py-1 text-xs">
+          👹 <span class="font-bold text-red-400">LV{{ getFirstMonster()!.level }} {{ Math.floor(getFirstMonster()!.hp) }}/{{ getFirstMonster()!.maxHp }}</span>
         </div>
       </div>
       
@@ -4066,17 +4327,17 @@ onUnmounted(() => {
       <div class="absolute top-3 left-3 flex flex-col gap-1.5 z-10">
         <!-- Monster Avatar (clickable) -->
         <button 
-          v-if="monsterActive"
+          v-if="monsterActive && getFirstMonster()"
           class="flex items-center gap-2 px-2 py-1.5 rounded-lg backdrop-blur-sm border transition-all hover:scale-105"
-          :class="monster.hp > 0 ? 'bg-red-900/60 border-red-500/50 hover:bg-red-800/70' : 'bg-neutral-800/60 border-neutral-600/50'"
+          :class="getFirstMonster()!.hp > 0 ? 'bg-red-900/60 border-red-500/50 hover:bg-red-800/70' : 'bg-neutral-800/60 border-neutral-600/50'"
           @click="navigateToMonster"
         >
-          <div class="w-8 h-8 rounded-full flex items-center justify-center text-lg" :class="monster.hp > 0 ? 'bg-red-600' : 'bg-neutral-600'">
+          <div class="w-8 h-8 rounded-full flex items-center justify-center text-lg" :class="getFirstMonster()!.hp > 0 ? 'bg-red-600' : 'bg-neutral-600'">
             👹
           </div>
           <div class="text-left">
-            <div class="text-xs font-bold" :class="monster.hp > 0 ? 'text-red-300' : 'text-neutral-400'">{{ t('terms.monster') }}</div>
-            <div class="text-[10px]" :class="monster.hp > 0 ? 'text-red-400/80' : 'text-neutral-500'">LV{{ monster.level }}</div>
+            <div class="text-xs font-bold" :class="getFirstMonster()!.hp > 0 ? 'text-red-300' : 'text-neutral-400'">{{ t('terms.monster') }}</div>
+            <div class="text-[10px]" :class="getFirstMonster()!.hp > 0 ? 'text-red-400/80' : 'text-neutral-500'">LV{{ getFirstMonster()!.level }}</div>
           </div>
         </button>
         
@@ -4112,8 +4373,20 @@ onUnmounted(() => {
 
     <!-- Upgrade Modal -->
     <Transition name="popup">
-      <div v-if="showUpgradeModal && upgradeTarget" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" @click.self="closeUpgradeModal">
-        <div class="relative w-full max-w-xs rounded-2xl border border-white/20 bg-neutral-900/95 backdrop-blur-md p-5 shadow-2xl">
+      <div 
+        v-if="showUpgradeModal && upgradeTarget" 
+        class="fixed inset-0 z-50 flex items-start justify-center bg-black/80 backdrop-blur-sm p-4 pt-20"
+        :class="{ 'pointer-events-none': !modalInteractive }"
+        @click.self="modalInteractive && closeUpgradeModal()"
+        @touchstart.self="modalInteractive && closeUpgradeModal()"
+      >
+        <div 
+          class="relative w-full max-w-xs rounded-2xl border border-white/20 bg-neutral-900/95 backdrop-blur-md p-5 shadow-2xl"
+          :class="{ 'pointer-events-none': !modalInteractive }"
+          @touchstart.stop
+          @touchend.stop
+          @click.stop
+        >
           <button class="absolute right-3 top-3 text-xl text-neutral-500 hover:text-white" @click="closeUpgradeModal">✕</button>
           
           <!-- Door Upgrade -->
@@ -4147,10 +4420,15 @@ onUnmounted(() => {
                 <button 
                   v-if="upgradeTarget.room.doorLevel < 10"
                   class="rounded-xl bg-blue-600 hover:bg-blue-500 py-3 font-bold text-white transition"
-                  :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < upgradeTarget.room.doorUpgradeCost }"
-                  :disabled="(humanPlayer?.gold || 0) < upgradeTarget.room.doorUpgradeCost"
+                  :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < upgradeTarget.room.doorUpgradeCost || ((upgradeTarget.room.doorSoulCost || 0) > 0 && (humanPlayer?.souls || 0) < (upgradeTarget.room.doorSoulCost || 0)) }"
+                  :disabled="(humanPlayer?.gold || 0) < upgradeTarget.room.doorUpgradeCost || ((upgradeTarget.room.doorSoulCost || 0) > 0 && (humanPlayer?.souls || 0) < (upgradeTarget.room.doorSoulCost || 0))"
                   @click="upgradeDoor">
-                  {{ t('ui.upgradeDoor', { cost: upgradeTarget.room.doorUpgradeCost }) }}
+                  <template v-if="(upgradeTarget.room.doorSoulCost || 0) > 0">
+                    {{ t('ui.upgradeDoorWithSouls', { cost: upgradeTarget.room.doorUpgradeCost, souls: upgradeTarget.room.doorSoulCost }) }}
+                  </template>
+                  <template v-else>
+                    {{ t('ui.upgradeDoor', { cost: upgradeTarget.room.doorUpgradeCost }) }}
+                  </template>
                 </button>
                 <div v-else class="text-center text-green-400 py-2">{{ t('ui.maxLevel') }}</div>
                 
@@ -4193,10 +4471,15 @@ onUnmounted(() => {
             <div class="flex flex-col gap-2">
               <button 
                 class="rounded-xl bg-amber-600 hover:bg-amber-500 py-3 font-bold text-white transition"
-                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < upgradeTarget.room.bedUpgradeCost }"
-                :disabled="(humanPlayer?.gold || 0) < upgradeTarget.room.bedUpgradeCost"
+                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < upgradeTarget.room.bedUpgradeCost || ((upgradeTarget.room.bedSoulCost || 0) > 0 && (humanPlayer?.souls || 0) < (upgradeTarget.room.bedSoulCost || 0)) }"
+                :disabled="(humanPlayer?.gold || 0) < upgradeTarget.room.bedUpgradeCost || ((upgradeTarget.room.bedSoulCost || 0) > 0 && (humanPlayer?.souls || 0) < (upgradeTarget.room.bedSoulCost || 0))"
                 @click="upgradeBed">
-                {{ t('ui.upgradeBed', { cost: upgradeTarget.room.bedUpgradeCost, income: upgradeTarget.room.bedIncome * 2 }) }}
+                <template v-if="(upgradeTarget.room.bedSoulCost || 0) > 0">
+                  {{ t('ui.upgradeBedWithSouls', { cost: upgradeTarget.room.bedUpgradeCost, souls: upgradeTarget.room.bedSoulCost, income: upgradeTarget.room.bedIncome * 2 }) }}
+                </template>
+                <template v-else>
+                  {{ t('ui.upgradeBed', { cost: upgradeTarget.room.bedUpgradeCost, income: upgradeTarget.room.bedIncome * 2 }) }}
+                </template>
               </button>
               <button class="rounded-xl border border-neutral-600 py-2 text-sm text-neutral-300 hover:bg-white/10 transition" @click="closeUpgradeModal">
                 {{ t('ui.cancel') }}
@@ -4210,9 +4493,10 @@ onUnmounted(() => {
               'text-blue-400': upgradeTarget.building.type === 'turret',
               'text-green-400': upgradeTarget.building.type === 'atm',
               'text-violet-400': upgradeTarget.building.type === 'soul_collector',
-              'text-indigo-400': upgradeTarget.building.type === 'vanguard'
+              'text-indigo-400': upgradeTarget.building.type === 'vanguard',
+              'text-orange-400': upgradeTarget.building.type === 'smg'
             }">
-              {{ upgradeTarget.building.type === 'turret' ? t('ui.turretTitle') : upgradeTarget.building.type === 'atm' ? t('ui.atmTitle') : upgradeTarget.building.type === 'vanguard' ? t('ui.vanguardTitle') : t('ui.soulCollectorTitle') }}
+              {{ upgradeTarget.building.type === 'turret' ? t('ui.turretTitle') : upgradeTarget.building.type === 'atm' ? t('ui.atmTitle') : upgradeTarget.building.type === 'vanguard' ? t('ui.vanguardTitle') : upgradeTarget.building.type === 'smg' ? t('ui.smgTitle') : t('ui.soulCollectorTitle') }}
             </h2>
             <div class="text-center mb-4">
               <div class="text-2xl font-bold">{{ t('terms.level') }} {{ upgradeTarget.building.level }}/10</div>
@@ -4259,45 +4543,55 @@ onUnmounted(() => {
             <!-- Turret -->
             <button
               class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-amber-500/50 hover:bg-white/10"
-              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < economyConfig.turretCost }"
-              :disabled="(humanPlayer?.gold || 0) < economyConfig.turretCost"
+              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.turret }"
+              :disabled="(humanPlayer?.gold || 0) < buildingCosts.turret"
               @click="buildDefense('turret')">
               <div class="text-2xl mb-1">🔫</div>
               <div class="font-bold text-sm">{{ t('ui.turret') }}</div>
-              <div class="text-xs text-amber-400">{{ economyConfig.turretCost }}g</div>
+              <div class="text-xs text-amber-400">{{ buildingCosts.turret }}g</div>
             </button>
             <!-- ATM -->
             <button
               class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-purple-500/50 hover:bg-white/10"
-              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.souls || 0) < economyConfig.atmCost }"
-              :disabled="(humanPlayer?.souls || 0) < economyConfig.atmCost"
+              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.souls || 0) < buildingCosts.atm }"
+              :disabled="(humanPlayer?.souls || 0) < buildingCosts.atm"
               @click="buildDefense('atm')">
               <div class="text-2xl mb-1">🏧</div>
               <div class="font-bold text-sm">{{ t('ui.atm') }}</div>
-              <div class="text-xs text-purple-400">{{ economyConfig.atmCost }}👻</div>
+              <div class="text-xs text-purple-400">{{ buildingCosts.atm }}👻</div>
             </button>
             <!-- Soul Collector -->
             <button
               class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-purple-500/50 hover:bg-white/10"
-              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < economyConfig.soulCollectorCost }"
-              :disabled="(humanPlayer?.gold || 0) < economyConfig.soulCollectorCost"
+              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.soulCollector }"
+              :disabled="(humanPlayer?.gold || 0) < buildingCosts.soulCollector"
               @click="buildDefense('soul_collector')">
               <div class="text-2xl mb-1">👻</div>
               <div class="font-bold text-sm">{{ t('ui.soul') }}</div>
-              <div class="text-xs text-amber-400">{{ economyConfig.soulCollectorCost }}g</div>
+              <div class="text-xs text-amber-400">{{ buildingCosts.soulCollector }}g</div>
             </button>
             <!-- Vanguard -->
             <button
               class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-indigo-500/50 hover:bg-white/10"
-              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < economyConfig.vanguardCost }"
-              :disabled="(humanPlayer?.gold || 0) < economyConfig.vanguardCost"
+              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.vanguard }"
+              :disabled="(humanPlayer?.gold || 0) < buildingCosts.vanguard"
               @click="buildDefense('vanguard')">
               <div class="text-2xl mb-1">⚔️</div>
               <div class="font-bold text-sm">{{ t('ui.vanguard') }}</div>
-              <div class="text-xs text-amber-400">{{ economyConfig.vanguardCost }}g</div>
+              <div class="text-xs text-amber-400">{{ buildingCosts.vanguard }}g</div>
+            </button>
+            <!-- SMG -->
+            <button
+              class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-orange-500/50 hover:bg-white/10"
+              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.smg }"
+              :disabled="(humanPlayer?.gold || 0) < buildingCosts.smg"
+              @click="buildDefense('smg')">
+              <div class="text-2xl mb-1">🔥</div>
+              <div class="font-bold text-sm">{{ t('ui.smg') }}</div>
+              <div class="text-xs text-amber-400">{{ buildingCosts.smg }}g</div>
             </button>
           </div>
-          <p class="text-xs text-neutral-500 mt-3 text-center">{{ t('ui.vanguardDesc') }}</p>
+          <p class="text-xs text-neutral-500 mt-3 text-center">{{ t('ui.smgDesc') }}</p>
         </div>
       </div>
     </Transition>

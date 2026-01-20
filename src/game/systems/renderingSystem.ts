@@ -142,6 +142,9 @@ export function drawBuilding(
     case 'vanguard':
       drawVanguardBuilding(ctx, centerX, centerY, cellSize)
       break
+    case 'smg':
+      drawSMG(ctx, centerX, centerY, cellSize, building)
+      break
   }
   
   // HP bar
@@ -174,6 +177,58 @@ function drawTurret(ctx: CanvasRenderingContext2D, cx: number, cy: number, size:
   ctx.fillRect(0, -4, size * 0.4, 8)
   
   ctx.restore()
+}
+
+function drawSMG(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number, building: DefenseBuilding): void {
+  // Outer glow ring
+  ctx.strokeStyle = '#f97316'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.arc(cx, cy, size * 0.38, 0, Math.PI * 2)
+  ctx.stroke()
+  
+  // Base platform - darker orange/brown
+  ctx.fillStyle = '#78350f'
+  ctx.beginPath()
+  ctx.arc(cx, cy, size * 0.35, 0, Math.PI * 2)
+  ctx.fill()
+  
+  // Inner ring - orange
+  ctx.fillStyle = '#ea580c'
+  ctx.beginPath()
+  ctx.arc(cx, cy, size * 0.25, 0, Math.PI * 2)
+  ctx.fill()
+  
+  // Rotating barrel assembly
+  ctx.save()
+  ctx.translate(cx, cy)
+  ctx.rotate(building.rotation || 0)
+  
+  // Barrel housing - dark metal box
+  ctx.fillStyle = '#292524'
+  ctx.fillRect(0, -size * 0.18, size * 0.45, size * 0.36)
+  
+  // 3 barrel tubes - orange
+  const barrelY = [-size * 0.1, 0, size * 0.1]
+  for (const by of barrelY) {
+    // Barrel body
+    ctx.fillStyle = '#f97316'
+    ctx.fillRect(size * 0.08, by - 2.5, size * 0.4, 5)
+    
+    // Barrel tip highlight
+    ctx.fillStyle = '#fcd34d'
+    ctx.beginPath()
+    ctx.arc(size * 0.48, by, 3, 0, Math.PI * 2)
+    ctx.fill()
+  }
+  
+  ctx.restore()
+  
+  // Center core - bright orange dot
+  ctx.fillStyle = '#fb923c'
+  ctx.beginPath()
+  ctx.arc(cx, cy, size * 0.1, 0, Math.PI * 2)
+  ctx.fill()
 }
 
 function drawATM(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number): void {

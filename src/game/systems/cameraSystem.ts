@@ -129,12 +129,13 @@ export function handleTouchMove(
       camera.isManualMode = true
       
       const pad = GAME_CONSTANTS.CAMERA_PADDING
+      const bottomPad = pad + (GAME_CONSTANTS.CAMERA_BOTTOM_PADDING || 0)
       camera.x = Math.max(-pad, Math.min(
         GAME_CONSTANTS.WORLD_WIDTH - viewportWidth + pad,
         dragState.cameraStartX + dx
       ))
       camera.y = Math.max(-pad, Math.min(
-        GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight + pad,
+        GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight + bottomPad,
         dragState.cameraStartY + dy
       ))
     }
@@ -176,8 +177,9 @@ export function updateCamera(
   
   // Clamp camera
   const pad = camera.isManualMode ? GAME_CONSTANTS.CAMERA_PADDING : 0
+  const bottomPad = pad + (camera.isManualMode ? (GAME_CONSTANTS.CAMERA_BOTTOM_PADDING || 0) : 0)
   camera.x = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_WIDTH - viewportWidth + pad, camera.x))
-  camera.y = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight + pad, camera.y))
+  camera.y = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight + bottomPad, camera.y))
 }
 
 // =============================================================================
@@ -194,8 +196,9 @@ export function navigateToPosition(
   const targetY = y - viewportHeight / 2
   
   const pad = GAME_CONSTANTS.CAMERA_PADDING
+  const bottomPad = pad + (GAME_CONSTANTS.CAMERA_BOTTOM_PADDING || 0)
   camera.x = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_WIDTH - viewportWidth + pad, targetX))
-  camera.y = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight + pad, targetY))
+  camera.y = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight + bottomPad, targetY))
 }
 
 export function navigateToPlayer(
