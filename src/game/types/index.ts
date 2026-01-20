@@ -137,6 +137,7 @@ export interface Monster extends BaseEntity {
   healZones: Vector2[]
   isRetreating: boolean
   isFullyHealing: boolean
+  healingInterrupted: boolean // Healing was interrupted due to low mana
   healIdleTimer: number
   targetTimer: number
   lastTargets: number[]

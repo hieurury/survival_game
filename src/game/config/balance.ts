@@ -11,7 +11,7 @@ export const HERO_BALANCE = {
   /** Player HP */
   HP: 100,
   /** Player movement speed */
-  SPEED: 180,
+  SPEED: 120,
   /** Player base damage */
   DAMAGE: 15,
   /** Player attack range */
@@ -29,7 +29,7 @@ export const MONSTER_BALANCE = {
   /** Monster base damage at level 1 */
   BASE_DAMAGE: 10,
   /** Monster base movement speed */
-  SPEED: 120,
+  SPEED: 180,
   /** Monster attack range */
   ATTACK_RANGE: 55,
   /** Monster attack speed (attacks per second) */
@@ -45,9 +45,9 @@ export const MONSTER_BALANCE = {
   /** HP multiplier per level */
   HP_SCALE: 1.3,
   /** Base seconds for first level up */
-  BASE_LEVEL_TIME: 25,
+  BASE_LEVEL_TIME: 30,
   /** Additional seconds per level */
-  LEVEL_TIME_INCREMENT: 5,
+  LEVEL_TIME_INCREMENT: 10,
 } as const
 
 // =============================================================================
@@ -55,9 +55,9 @@ export const MONSTER_BALANCE = {
 // =============================================================================
 export const DOOR_BALANCE = {
   /** Base door HP at level 1 */
-  BASE_HP: 400,
+  BASE_HP: 450,
   /** HP multiplier per level */
-  HP_SCALE: 1.5,
+  HP_SCALE: 2.0,
   /** Base upgrade cost (gold) */
   BASE_UPGRADE_COST: 40,
   /** Cost multiplier per level (doubles each level) */
@@ -65,7 +65,7 @@ export const DOOR_BALANCE = {
   /** Level at which souls are required */
   SOUL_REQUIRED_LEVEL: 5,
   /** Soul cost starting at level 5 */
-  SOUL_COST: 215,
+  SOUL_COST: 50,
   /** Repair duration in seconds */
   REPAIR_DURATION: 5,
   /** Repair cooldown in seconds */
@@ -89,25 +89,47 @@ export const BED_BALANCE = {
   /** Level at which souls are required */
   SOUL_REQUIRED_LEVEL: 5,
   /** Soul cost starting at level 5 */
-  SOUL_COST: 200,
+  SOUL_COST: 50,
 } as const
 
 // =============================================================================
 // BUILDING COSTS (DO NOT MODIFY IN GAME MODES)
+// Giá MUA bằng VÀNG (gold)
 // =============================================================================
 export const BUILDING_COSTS = {
   /** Turret cost in gold */
   TURRET: 10,
-  /** ATM cost in souls */
+  /** ATM cost in gold */
   ATM: 200,
   /** Soul collector cost in gold */
-  SOUL_COLLECTOR: 440,
+  SOUL_COLLECTOR: 200,
   /** Vanguard spawner cost in gold */
-  VANGUARD: 250,
+  VANGUARD: 150,
   /** SMG cost in gold */
   SMG: 100,
   /** Base door upgrade cost */
   UPGRADE_DOOR: 20,
+} as const
+
+// =============================================================================
+// SOUL COSTS FOR LEVEL 5+ UPGRADES
+// Giá linh hồn khi nâng cấp từ level 5 trở lên
+// =============================================================================
+export const SOUL_COSTS_LV5 = {
+  /** Giường - 50 souls từ lv5 */
+  BED: 50,
+  /** Cửa - 50 souls từ lv5 */
+  DOOR: 50,
+  /** Súng tự động - 10 souls từ lv5 */
+  TURRET: 10,
+  /** Súng tiểu liên - 20 souls từ lv5 */
+  SMG: 20,
+  /** Máy ATM - 100 souls từ lv5 */
+  ATM: 100,
+  /** Máy thu hồn - 200 souls từ lv5 */
+  SOUL_COLLECTOR: 200,
+  /** Lính tiên phong - 50 souls từ lv5 */
+  VANGUARD: 50,
 } as const
 
 // =============================================================================
@@ -139,7 +161,7 @@ export const BUILDING_BALANCE = {
     damage: 0,
     range: 0,
     cooldown: 0,
-    upgradeCost: 440,
+    upgradeCost: 200,
     soulRate: 1,
   },
   
@@ -151,21 +173,24 @@ export const BUILDING_BALANCE = {
     upgradeCost: 150,
   },
   
-  /** SMG - Submachine Gun (Súng tiểu liên) */
+  /** SMG - Submachine Gun (Súng tiểu liên)
+   * Giá trị từ DEFAULT_SMG_CONFIG trong entities/weapons/SMG.ts
+   */
   SMG: {
     hp: 50,
-    damage: 5, // Base damage per bullet
-    range: 200, // Base range
+    damage: 8, // Base damage per bullet (từ entities: baseDamage: 8)
+    range: 300, // Base range (từ entities: baseRange: 300)
     cooldown: 7.0, // 7 seconds between bursts
     upgradeCost: 100, // Base upgrade cost in gold
     burstCount: 10, // Bullets per burst
     burstInterval: 0.1, // 0.1s between each bullet in burst
-    /** Damage scale per level (+10%) */
-    damageScale: 1.1,
-    /** Range scale per level (+20%) */
-    rangeScale: 1.2,
+    fireRate: 10, // Shots per second (từ entities: fireRate: 10)
+    /** Damage scale per level (+15%) */
+    damageScale: 1.15, // (từ entities: damageScale: 1.15)
+    /** Range scale per level (+5%) */
+    rangeScale: 1.05, // (từ entities: rangeScale: 1.05)
     /** Soul cost from level 5 */
-    soulCost: 200,
+    soulCost: 20, // (từ SOUL_COSTS_LV5.SMG)
     /** Level at which souls are required */
     soulRequiredLevel: 5,
   },

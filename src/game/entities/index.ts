@@ -6,17 +6,17 @@
 // Base Entity
 export * from './base/Entity'
 
-// Heroes (Player & Bot)
-export * from './heroes/Hero'
+// Heroes (Player & Bot) - New OOP structure
+export * from './heroes/index'
 
-// Monsters
-export * from './monsters/Monster'
+// Monsters - New OOP structure
+export * from './monsters/index'
 
-// Structures (ATM, Soul Collector)
-export * from './structures/Structure'
+// Structures (ATM, Soul Collector) - New OOP structure
+export * from './structures/index'
 
-// Weapons (Turret, Vanguard)
-export * from './weapons/Weapon'
+// Weapons (Turret, Vanguard, SMG) - New OOP structure
+export * from './weapons/index'
 
 // Rooms
 export * from './rooms/Room'

@@ -1,0 +1,185 @@
+/**
+ * Game Mode Configuration
+ * 
+ * File này CHỈ chứa các cấu hình cho game modes:
+ * - Kích thước phòng, vị trí phòng
+ * - Vị trí spawn quái, heal zones
+ * - Các giá trị ngẫu nhiên, scaling theo mode
+ * 
+ * KHÔNG chứa stats của buildings/weapons/monsters
+ * → Stats lấy từ entities (src/game/config/entityConfigs.ts)
+ */
+
+// =============================================================================
+// ECONOMY SETTINGS (có thể điều chỉnh theo game mode)
+// =============================================================================
+export const ECONOMY_CONFIG = {
+  /** Vàng khởi đầu */
+  STARTING_GOLD: 20,
+  /** Vàng nhận mỗi giây (passive) */
+  GOLD_PER_SECOND: 0,
+} as const
+
+// =============================================================================
+// PURCHASE COSTS - Giá MUA bằng VÀNG (gold)
+// Lưu ý: ATM mua bằng LINH HỒN, không nằm ở đây
+// =============================================================================
+export const PURCHASE_COSTS = {
+  turret: 10,
+  smg: 100,
+  // atm: Mua bằng souls (100) - xem DEFAULT_ATM_CONFIG
+  soul_collector: 200,
+  vanguard: 150,
+  upgradeDoor: 40,
+  moveRoom: 6,
+} as const
+
+// =============================================================================
+// SOUL PURCHASE COSTS - Giá MUA bằng LINH HỒN
+// =============================================================================
+export const SOUL_PURCHASE_COSTS = {
+  atm: 100, // ATM mua bằng 100 linh hồn
+} as const
+
+// =============================================================================
+// SOUL COSTS - Giá linh hồn khi nâng cấp từ LEVEL 5+
+// =============================================================================
+export const SOUL_COSTS_LV5 = {
+  bed: 50,
+  door: 50,
+  turret: 10,
+  smg: 20,
+  atm: 100,
+  soul_collector: 200,
+  vanguard: 50,
+} as const
+
+// =============================================================================
+// NOTE: DOOR & BED configs đã chuyển sang entities
+// - Door: src/game/entities/rooms/Door.ts -> DEFAULT_DOOR_CONFIG
+// - Bed: src/game/entities/rooms/Bed.ts -> DEFAULT_BED_CONFIG
+// =============================================================================
+
+// =============================================================================
+// MAP LAYOUT (có thể điều chỉnh theo game mode)
+// =============================================================================
+export const MAP_CONFIG = {
+  /** Số cột grid */
+  GRID_COLS: 60,
+  /** Số hàng grid */
+  GRID_ROWS: 44,
+  /** Kích thước cell (pixels) */
+  CELL_SIZE: 48,
+  /** Số phòng */
+  ROOMS_COUNT: 7,
+} as const
+
+// =============================================================================
+// SPAWN ZONE - Vùng spawn người chơi
+// =============================================================================
+export const SPAWN_ZONE_CONFIG = {
+  gridX: 26,
+  gridY: 17,
+  width: 8,
+  height: 6,
+} as const
+
+// =============================================================================
+// MONSTER NESTS - Vùng hồi máu quái
+// =============================================================================
+export const MONSTER_NEST_CONFIG = {
+  /** Các vị trí nest */
+  POSITIONS: [
+    { gridX: 2, gridY: 2, width: 4, height: 4 },      // Top-left
+    { gridX: 54, gridY: 34, width: 4, height: 4 },    // Bottom-right
+  ],
+  /** Mana tối đa của healing point */
+  MAX_MANA: 5000,
+  /** Mana hồi mỗi giây */
+  MANA_REGEN: 50,
+  /** % mana tối thiểu để quái có thể hồi */
+  MIN_MANA_PERCENT: 0.10,
+} as const
+
+// =============================================================================
+// CAMERA/VIEWPORT (có thể điều chỉnh theo device)
+// =============================================================================
+export const VIEWPORT_CONFIG = {
+  WIDTH: 960,
+  HEIGHT: 540,
+  CAMERA_PADDING: 400,
+  CAMERA_BOTTOM_PADDING: 200,
+} as const
+
+// =============================================================================
+// GAME MODE PRESETS
+// =============================================================================
+export type GameModeType = 'normal' | 'hardcore' | 'endless' | 'tutorial'
+
+export interface GameModeConfig {
+  name: string
+  description: string
+  /** Hệ số nhân HP quái */
+  monsterHpMultiplier: number
+  /** Hệ số nhân damage quái */
+  monsterDamageMultiplier: number
+  /** Hệ số nhân tốc độ quái */
+  monsterSpeedMultiplier: number
+  /** Số phòng */
+  roomCount: number
+  /** Vàng khởi đầu */
+  startingGold: number
+  /** Thời gian countdown */
+  countdownTime: number
+}
+
+export const GAME_MODES: Record<GameModeType, GameModeConfig> = {
+  normal: {
+    name: 'Normal',
+    description: 'Standard gameplay',
+    monsterHpMultiplier: 1.0,
+    monsterDamageMultiplier: 1.0,
+    monsterSpeedMultiplier: 1.0,
+    roomCount: 7,
+    startingGold: 20,
+    countdownTime: 30,
+  },
+  hardcore: {
+    name: 'Hardcore',
+    description: 'Stronger monsters, less resources',
+    monsterHpMultiplier: 1.5,
+    monsterDamageMultiplier: 1.3,
+    monsterSpeedMultiplier: 1.2,
+    roomCount: 5,
+    startingGold: 10,
+    countdownTime: 20,
+  },
+  endless: {
+    name: 'Endless',
+    description: 'Survive as long as possible',
+    monsterHpMultiplier: 1.0,
+    monsterDamageMultiplier: 1.0,
+    monsterSpeedMultiplier: 1.0,
+    roomCount: 9,
+    startingGold: 30,
+    countdownTime: 45,
+  },
+  tutorial: {
+    name: 'Tutorial',
+    description: 'Learn the basics',
+    monsterHpMultiplier: 0.5,
+    monsterDamageMultiplier: 0.5,
+    monsterSpeedMultiplier: 0.8,
+    roomCount: 3,
+    startingGold: 50,
+    countdownTime: 60,
+  },
+} as const
+
+// =============================================================================
+// ANIMATION & MISC
+// =============================================================================
+export const ANIMATION_CONFIG = {
+  SPEED: 0.1,
+  SMOOTH_FACTOR: 0.25,
+} as const

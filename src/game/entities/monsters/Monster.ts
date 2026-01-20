@@ -74,6 +74,7 @@ export interface MonsterRuntime {
   healZones: Vector2[]
   isRetreating: boolean
   isFullyHealing: boolean
+  healingInterrupted: boolean
   healIdleTimer: number
   facingRight: boolean
   targetTimer: number
@@ -115,6 +116,7 @@ export const createMonster = (
     healZones: [...healZones],
     isRetreating: false,
     isFullyHealing: false,
+    healingInterrupted: false,
     healIdleTimer: 0,
     facingRight: false,
     targetTimer: 0,

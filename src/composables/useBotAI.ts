@@ -276,7 +276,7 @@ function scoreBuildSoulCollector(ctx: BotContext): ActionScore {
 function scoreBuildATM(ctx: BotContext): ActionScore {
   const { player, myATMs, mySoulCollectors, room, emptyBuildSpot } = ctx
   // ATM costs SOULS, not gold!
-  const canAfford = player.souls >= GAME_CONSTANTS.COSTS.atm
+  const canAfford = player.souls >= GAME_CONSTANTS.SOUL_COSTS.atm
   
   if (!canAfford || myATMs.length >= 1 || !emptyBuildSpot || !room) {
     return { action: 'build_atm', score: 0, reason: 'Cannot build ATM' }
@@ -468,15 +468,13 @@ export function executeBuildStructure(
   spot: Vector2,
   cellSize: number
 ): BotActionResult {
-  // Get cost - all building types use their type name directly in COSTS
-  const cost = GAME_CONSTANTS.COSTS[type as keyof typeof GAME_CONSTANTS.COSTS] || 0
-  const useSouls = type === 'atm'
-  
-  // Check affordability
-  if (useSouls) {
-    if (player.souls < cost) return { success: false, message: 'Not enough souls' }
-    player.souls -= cost
+  // ATM uses SOULS, others use GOLD
+  if (type === 'atm') {
+    const soulCost = GAME_CONSTANTS.SOUL_COSTS.atm
+    if (player.souls < soulCost) return { success: false, message: 'Not enough souls' }
+    player.souls -= soulCost
   } else {
+    const cost = GAME_CONSTANTS.COSTS[type as keyof typeof GAME_CONSTANTS.COSTS] || 0
     if (player.gold < cost) return { success: false, message: 'Not enough gold' }
     player.gold -= cost
   }

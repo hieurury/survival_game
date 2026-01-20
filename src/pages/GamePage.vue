@@ -24,13 +24,13 @@ const {
   spawnZone,
 } = useGameState()
 
-// Building costs - using GAME_CONSTANTS with economy multiplier
+// Building costs - VÀNG (trừ ATM dùng LINH HỒN)
 const buildingCosts = computed(() => ({
   turret: Math.floor(GAME_CONSTANTS.COSTS.turret * economyConfig.value.buildingCostMultiplier),
-  atm: Math.floor(GAME_CONSTANTS.COSTS.atm * economyConfig.value.buildingCostMultiplier), // ATM costs souls
-  soulCollector: Math.floor(GAME_CONSTANTS.COSTS.soul_collector * economyConfig.value.buildingCostMultiplier),
-  vanguard: Math.floor(GAME_CONSTANTS.VANGUARD.GOLD_COST * economyConfig.value.buildingCostMultiplier),
   smg: Math.floor(GAME_CONSTANTS.COSTS.smg * economyConfig.value.buildingCostMultiplier),
+  atm: GAME_CONSTANTS.SOUL_COSTS.atm, // ATM mua bằng LINH HỒN
+  soulCollector: Math.floor(GAME_CONSTANTS.COSTS.soul_collector * economyConfig.value.buildingCostMultiplier),
+  vanguard: Math.floor(GAME_CONSTANTS.COSTS.vanguard * economyConfig.value.buildingCostMultiplier),
   upgradeDoor: Math.floor(GAME_CONSTANTS.COSTS.upgradeDoor * economyConfig.value.upgradeCostMultiplier)
 }))
 
@@ -46,8 +46,8 @@ let animationId: number | null = null
 let lastTime = 0
 
 // Responsive viewport - adapts to screen size
-const viewportWidth = ref(GAME_CONSTANTS.VIEWPORT_WIDTH)
-const viewportHeight = ref(GAME_CONSTANTS.VIEWPORT_HEIGHT)
+const viewportWidth = ref<number>(GAME_CONSTANTS.VIEWPORT_WIDTH)
+const viewportHeight = ref<number>(GAME_CONSTANTS.VIEWPORT_HEIGHT)
 
 // Update viewport size based on container
 const updateViewportSize = () => {
@@ -511,6 +511,7 @@ const createMonster = (monsterId: number, spawnPos: Vector2): Monster => {
     })),
     isRetreating: false,
     isFullyHealing: false,
+    healingInterrupted: false,
     healIdleTimer: 0,
     facingRight: false,
     targetTimer: 0,
@@ -699,6 +700,44 @@ const getBuildingDamage = (baseDamage: number, level: number): number => {
 
 const getBuildingRange = (baseRange: number, level: number): number => {
   return Math.floor(baseRange * Math.pow(GAME_CONSTANTS.BUILDING_RANGE_SCALE, level - 1))
+}
+
+/**
+ * Check if any healing point has enough mana for healing
+ */
+const hasAnyHealingPointWithMana = (): boolean => {
+  const hConfig = healingPointConfig.value
+  const minManaToStart = hConfig.maxMana * hConfig.minManaPercent
+  return healingPoints.some(hp => hp.manaPower >= minManaToStart)
+}
+
+/**
+ * Check if monster should reactivate fleeing mode after taking damage
+ * This is called when monster takes damage and was previously interrupted from healing
+ * If HP is still below heal threshold (20%) AND there's a healing point with mana, trigger fleeing again
+ */
+const checkMonsterFleeReactivation = (monster: Monster): void => {
+  const mConfig = monsterConfig.value
+  const hpRatio = monster.hp / monster.maxHp
+  
+  // If healing was interrupted and HP is still below threshold, check if can re-flee
+  if (monster.healingInterrupted && hpRatio < mConfig.healThreshold) {
+    // Only re-trigger fleeing if there's a healing point with enough mana
+    if (hasAnyHealingPointWithMana()) {
+      monster.isRetreating = true
+      monster.isFullyHealing = true
+      monster.healingInterrupted = false // Reset flag
+      monster.targetPlayerId = null
+      monster.targetVanguardId = null
+      monster.targetTimer = 0
+      monster.speed = monster.baseSpeed * mConfig.retreatSpeedBonus
+      monster.monsterState = 'retreat'
+      spawnFloatingText(monster.position, '🏃 Trốn!', '#fbbf24', 14)
+      addMessage(t('messages.monsterRetreating'))
+    }
+    // If no healing point has mana, keep healingInterrupted = true
+    // Monster will continue fighting until a healing point regenerates mana
+  }
 }
 
 // Camera drag handlers - LEFT CLICK to drag camera
@@ -1229,34 +1268,26 @@ const navigateToMonster = () => {
 }
 
 // Build defense (only in rooms)
+// ATM mua bằng LINH HỒN, các loại khác mua bằng VÀNG
 const buildDefense = (type: DefenseBuilding['type']) => {
   if (!selectedBuildSpot.value || !humanPlayer.value) return
   
-  // Vanguard uses different cost structure
-  if (type === 'vanguard') {
-    const goldCost = GAME_CONSTANTS.VANGUARD.GOLD_COST
-    if (humanPlayer.value.gold < goldCost) {
-      addMessage(t('messages.notEnoughGoldNeed', { cost: goldCost }))
+  // ATM uses souls, others use gold
+  if (type === 'atm') {
+    const soulCost = GAME_CONSTANTS.SOUL_COSTS.atm
+    if (humanPlayer.value.souls < soulCost) {
+      addMessage(t('messages.notEnoughSouls'))
       return
     }
-    humanPlayer.value.gold -= goldCost
+    humanPlayer.value.souls -= soulCost
   } else {
+    // Get cost from COSTS (gold)
     const cost = GAME_CONSTANTS.COSTS[type as keyof typeof GAME_CONSTANTS.COSTS] || 0
-    
-    // ATM costs SOULS, other buildings cost GOLD
-    if (type === 'atm') {
-      if (humanPlayer.value.souls < cost) {
-        addMessage(t('messages.notEnoughSouls', { cost: cost }))
-        return
-      }
-      humanPlayer.value.souls -= cost
-    } else {
-      if (humanPlayer.value.gold < cost) {
-        addMessage(t('messages.notEnoughGold'))
-        return
-      }
-      humanPlayer.value.gold -= cost
+    if (humanPlayer.value.gold < cost) {
+      addMessage(t('messages.notEnoughGold'))
+      return
     }
+    humanPlayer.value.gold -= cost
   }
   
   const stats = GAME_CONSTANTS.BUILDINGS[type]
@@ -1516,28 +1547,39 @@ const upgradeBuilding = () => {
   const building = upgradeTarget.value.building
   if (!building) return
   
-  // Check if needs souls at level 5+
-  if (building.level >= 4) {
-    const soulCost = GAME_CONSTANTS.SOUL_UPGRADE_COST * (building.level - 3)
-    if (humanPlayer.value.souls < soulCost) {
-      addMessage(t('messages.needSoulsForLevel', { cost: soulCost, level: building.level + 1 }))
-      return
-    }
-    humanPlayer.value.souls -= soulCost
-  }
-  
   if (building.level >= 10) {
     addMessage(t('messages.buildingMaxLevel', { type: getBuildingTypeName(building.type) }))
     showUpgradeModal.value = false
     return
   }
   
-  if (humanPlayer.value.gold < building.upgradeCost) {
-    addMessage(t('messages.needGoldToUpgrade', { cost: building.upgradeCost }))
-    return
+  // ATM: Nâng cấp bằng LINH HỒN (gấp đôi mỗi level)
+  if (building.type === 'atm') {
+    const soulCost = building.upgradeCost // ATM upgradeCost là souls
+    if (humanPlayer.value.souls < soulCost) {
+      addMessage(t('messages.needSoulsToUpgrade', { cost: soulCost }))
+      return
+    }
+    humanPlayer.value.souls -= soulCost
+  } else {
+    // Các loại khác: Check souls at level 5+
+    if (building.level >= 4) {
+      const soulCost = GAME_CONSTANTS.SOUL_UPGRADE_COST * (building.level - 3)
+      if (humanPlayer.value.souls < soulCost) {
+        addMessage(t('messages.needSoulsForLevel', { cost: soulCost, level: building.level + 1 }))
+        return
+      }
+      humanPlayer.value.souls -= soulCost
+    }
+    
+    // Check gold
+    if (humanPlayer.value.gold < building.upgradeCost) {
+      addMessage(t('messages.needGoldToUpgrade', { cost: building.upgradeCost }))
+      return
+    }
+    humanPlayer.value.gold -= building.upgradeCost
   }
   
-  humanPlayer.value.gold -= building.upgradeCost
   building.level++
   
   // Turret: +10% damage, +20% range
@@ -1775,22 +1817,27 @@ const updateMonsterAI = (deltaTime: number) => {
     // HEALING WITH MANA SYSTEM: Healing consumes mana, immediate re-engage
     // Monster locks onto ONE healing point until fully healed or mana FULLY depleted
     // Once locked, monster stays until: (1) fully healed OR (2) mana = 0
+    // healingInterrupted = true means no healing point has mana, skip retreat
     // =========================================================================
     
     // STATE: RETREAT - when HP is low, go to nearest nest with mana
-    if (monster.hp / monster.maxHp < mConfig.healThreshold || monster.isFullyHealing) {
+    // Skip retreat if healingInterrupted (all healing points exhausted)
+    if ((monster.hp / monster.maxHp < mConfig.healThreshold || monster.isFullyHealing) && !monster.healingInterrupted) {
       monster.monsterState = 'retreat'
       
       // Use locked healing point if available, otherwise find new one
       let targetHealingPoint = getLockedHealingPoint()
       
-      // Check if locked point is COMPLETELY depleted (mana = 0)
-      // Note: We only abandon when mana is 0, not when below minMana
-      if (targetHealingPoint && targetHealingPoint.manaPower <= 0) {
-        // Locked point fully depleted - clear it and find new one
+      // Check if locked point is below minimum mana threshold (< 10%)
+      // Monster abandons healing point when mana drops below threshold
+      const minManaThresholdForRetreat = targetHealingPoint 
+        ? targetHealingPoint.maxManaPower * hConfig.minManaPercent 
+        : 0
+      if (targetHealingPoint && targetHealingPoint.manaPower < minManaThresholdForRetreat) {
+        // Locked point mana below threshold - clear it and find new one
         monster.targetHealingPointId = null
         targetHealingPoint = null
-        spawnFloatingText(monster.position, '⚡ Mana hết!', '#fbbf24', 14)
+        spawnFloatingText(monster.position, '⚡ Mana < 10%!', '#fbbf24', 14)
       }
       
       // If no locked point, find a new one (using minMana threshold)
@@ -1813,6 +1860,9 @@ const updateMonsterAI = (deltaTime: number) => {
         monster.targetHealingPointId = null
         monster.speed = monster.baseSpeed
         monster.monsterState = 're-engage'
+        // Mark healing as interrupted - monster won't try to retreat again until mana is available
+        monster.healingInterrupted = true
+        // Fall through to normal AI behavior below
       } else {
         // Set retreat state if not already retreating
         if (!monster.isRetreating && !monster.isFullyHealing) {
@@ -1840,13 +1890,18 @@ const updateMonsterAI = (deltaTime: number) => {
           }
         } else {
           // STATE: HEAL - at the locked healing point, regenerate using mana
-          // Check if mana is depleted - stop healing immediately
-          if (targetHealingPoint.manaPower <= 0) {
-            spawnFloatingText(monster.position, '⚡ Hết mana!', '#fbbf24', 14)
+          // Check if mana is below minimum threshold (10%) - stop healing immediately
+          const minManaThreshold = targetHealingPoint.maxManaPower * hConfig.minManaPercent
+          if (targetHealingPoint.manaPower < minManaThreshold) {
+            spawnFloatingText(monster.position, '⚡ Mana < 10%!', '#fbbf24', 14)
             monster.isFullyHealing = false
             monster.isRetreating = false
             monster.targetHealingPointId = null
             monster.speed = monster.baseSpeed
+            // Mark that healing was interrupted while HP still low
+            // BUT only if there's another healing point with mana available
+            const hpRatio = monster.hp / monster.maxHp
+            monster.healingInterrupted = hpRatio < mConfig.healThreshold && hasAnyHealingPointWithMana()
             monster.monsterState = 're-engage'
             addMessage(t('messages.healingPointDepleted'))
             continue // Skip to next monster
@@ -1879,6 +1934,7 @@ const updateMonsterAI = (deltaTime: number) => {
             monster.hp = monster.maxHp
             monster.isFullyHealing = false
             monster.isRetreating = false
+            monster.healingInterrupted = false
             monster.targetHealingPointId = null
             monster.speed = monster.baseSpeed
             monster.targetPlayerId = null
@@ -2465,7 +2521,7 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     // ------------------------------------------------------------------
     // ACTION 7: BUILD ATM (Late-game economy - costs SOULS)
     // ------------------------------------------------------------------
-    if (myATMs.length === 0 && mySoulCollectors.length > 0 && player.souls >= GAME_CONSTANTS.COSTS.atm && economySpot) {
+    if (myATMs.length === 0 && mySoulCollectors.length > 0 && player.souls >= GAME_CONSTANTS.SOUL_COSTS.atm && economySpot) {
       let score = 45
       // Low threat = economy focus
       if (threatLevel === 'low') score *= 1.5
@@ -2811,6 +2867,9 @@ const updateVanguardAI = (deltaTime: number) => {
           // Monster reacts - prioritize this vanguard
           targetMonster.targetVanguardId = unit.id
           
+          // Check if monster should reactivate fleeing
+          checkMonsterFleeReactivation(targetMonster)
+          
           playSfx('hit')
           spawnParticles(targetMonster.position, 'blood', 6, '#a855f7')
           spawnFloatingText(targetMonster.position, `-${unit.damage}`, '#a855f7', 12)
@@ -2918,10 +2977,30 @@ const updateVanguardAI = (deltaTime: number) => {
 
 // Update healing points - regenerate mana over time
 const updateHealingPoints = (deltaTime: number) => {
+  const hConfig = healingPointConfig.value
+  const minManaToStart = hConfig.maxMana * hConfig.minManaPercent
+  
   for (const hp of healingPoints) {
     // Regenerate mana at configured rate (50 mana/second)
     if (hp.manaPower < hp.maxManaPower) {
+      const oldMana = hp.manaPower
       hp.manaPower = Math.min(hp.maxManaPower, hp.manaPower + hp.manaRegenRate * deltaTime)
+      
+      // Check if this healing point just crossed the minimum threshold
+      // If so, reset healingInterrupted for all monsters so they can try to flee again
+      if (oldMana < minManaToStart && hp.manaPower >= minManaToStart) {
+        for (const monster of monsters) {
+          if (monster.healingInterrupted && monster.hp > 0) {
+            const mConfig = monsterConfig.value
+            const hpRatio = monster.hp / monster.maxHp
+            // Only reset if HP is still below threshold
+            if (hpRatio < mConfig.healThreshold) {
+              monster.healingInterrupted = false
+              // Will trigger retreat on next frame
+            }
+          }
+        }
+      }
     }
   }
 }
@@ -3045,6 +3124,9 @@ const updateProjectiles = (deltaTime: number) => {
       spawnParticles(proj.position, 'explosion', 8, proj.color)
       spawnFloatingText(proj.position, `-${proj.damage}`, '#3b82f6', 14)
       projectiles.splice(i, 1)
+      
+      // Check if monster should reactivate fleeing
+      checkMonsterFleeReactivation(hitMonster)
       
       // Check if all monsters dead
       if (hitMonster.hp <= 0) {
@@ -4415,13 +4497,7 @@ onUnmounted(() => {
             🛏️ {{ !monsterActive && currentNearRoom?.ownerId === null ? t('ui.claimAndSleep') : t('ui.sleep') }}
           </button>
         </Transition>
-        
-        <!-- Sleep status (when sleeping) - permanent, no wake button -->
-        <div v-if="humanPlayer?.isSleeping && gamePhase === 'playing'" class="rounded-xl border border-blue-500/30 bg-blue-950/70 backdrop-blur-sm p-3">
-          <p class="text-blue-300 text-sm mb-2">{{ t('ui.sleepingPermanently') }}</p>
-          <p class="text-blue-200/60 text-xs mb-1">{{ t('ui.sleepTipUpgrade') }}</p>
-          <p class="text-amber-300/60 text-xs">{{ t('ui.sleepTipDefense') }}</p>
-        </div>
+    
         
         <!-- Camera reset button -->
         <button 
@@ -4646,62 +4722,90 @@ onUnmounted(() => {
     <!-- Build Popup -->
     <Transition name="popup">
       <div v-if="showBuildPopup" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" @click.self="showBuildPopup = false">
-        <div class="relative w-full max-w-md rounded-2xl border border-white/20 bg-neutral-900/95 backdrop-blur-md p-5 shadow-2xl">
+        <div class="relative w-full max-w-lg rounded-2xl border border-white/20 bg-neutral-900/95 backdrop-blur-md p-5 shadow-2xl max-h-[80vh] overflow-y-auto">
           <button class="absolute right-3 top-3 text-xl text-neutral-500 hover:text-white" @click="showBuildPopup = false">✕</button>
           <h2 class="mb-3 text-center font-bold text-lg text-amber-400">{{ t('ui.buildDefense') }}</h2>
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <!-- Turret -->
-            <button
-              class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-amber-500/50 hover:bg-white/10"
-              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.turret }"
-              :disabled="(humanPlayer?.gold || 0) < buildingCosts.turret"
-              @click="buildDefense('turret')">
-              <div class="text-2xl mb-1">🔫</div>
-              <div class="font-bold text-sm">{{ t('ui.turret') }}</div>
-              <div class="text-xs text-amber-400">{{ buildingCosts.turret }}g</div>
-            </button>
-            <!-- ATM -->
-            <button
-              class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-purple-500/50 hover:bg-white/10"
-              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.souls || 0) < buildingCosts.atm }"
-              :disabled="(humanPlayer?.souls || 0) < buildingCosts.atm"
-              @click="buildDefense('atm')">
-              <div class="text-2xl mb-1">🏧</div>
-              <div class="font-bold text-sm">{{ t('ui.atm') }}</div>
-              <div class="text-xs text-purple-400">{{ buildingCosts.atm }}👻</div>
-            </button>
-            <!-- Soul Collector -->
-            <button
-              class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-purple-500/50 hover:bg-white/10"
-              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.soulCollector }"
-              :disabled="(humanPlayer?.gold || 0) < buildingCosts.soulCollector"
-              @click="buildDefense('soul_collector')">
-              <div class="text-2xl mb-1">👻</div>
-              <div class="font-bold text-sm">{{ t('ui.soul') }}</div>
-              <div class="text-xs text-amber-400">{{ buildingCosts.soulCollector }}g</div>
-            </button>
-            <!-- Vanguard -->
-            <button
-              class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-indigo-500/50 hover:bg-white/10"
-              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.vanguard }"
-              :disabled="(humanPlayer?.gold || 0) < buildingCosts.vanguard"
-              @click="buildDefense('vanguard')">
-              <div class="text-2xl mb-1">⚔️</div>
-              <div class="font-bold text-sm">{{ t('ui.vanguard') }}</div>
-              <div class="text-xs text-amber-400">{{ buildingCosts.vanguard }}g</div>
-            </button>
-            <!-- SMG -->
-            <button
-              class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-orange-500/50 hover:bg-white/10"
-              :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.smg }"
-              :disabled="(humanPlayer?.gold || 0) < buildingCosts.smg"
-              @click="buildDefense('smg')">
-              <div class="text-2xl mb-1">🔥</div>
-              <div class="font-bold text-sm">{{ t('ui.smg') }}</div>
-              <div class="text-xs text-amber-400">{{ buildingCosts.smg }}g</div>
-            </button>
+          
+          <!-- Resources Display -->
+          <div class="flex justify-center gap-6 mb-4 pb-3 border-b border-white/10">
+            <span class="text-amber-400 font-semibold">💰 {{ humanPlayer?.gold || 0 }}</span>
+            <span class="text-purple-400 font-semibold">👻 {{ humanPlayer?.souls || 0 }}</span>
           </div>
-          <p class="text-xs text-neutral-500 mt-3 text-center">{{ t('ui.smgDesc') }}</p>
+          
+          <!-- Phòng thủ -->
+          <div class="mb-4">
+            <h3 class="text-sm font-bold text-white/80 mb-2 flex items-center gap-2">
+              <span>🛡️</span> Phòng thủ
+            </h3>
+            <div class="grid grid-cols-2 gap-2">
+              <!-- Turret -->
+              <button
+                class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-amber-500/50 hover:bg-white/10"
+                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.turret }"
+                :disabled="(humanPlayer?.gold || 0) < buildingCosts.turret"
+                @click="buildDefense('turret')">
+                <div class="text-2xl mb-1">🔫</div>
+                <div class="font-bold text-sm">{{ t('ui.turret') }}</div>
+                <div class="text-xs text-amber-400">{{ buildingCosts.turret }}💰</div>
+                
+              </button>
+              <!-- SMG -->
+              <button
+                class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-orange-500/50 hover:bg-white/10"
+                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.smg }"
+                :disabled="(humanPlayer?.gold || 0) < buildingCosts.smg"
+                @click="buildDefense('smg')">
+                <div class="text-2xl mb-1">🔥</div>
+                <div class="font-bold text-sm">{{ t('ui.smg') }}</div>
+                <div class="text-xs text-amber-400">{{ buildingCosts.smg }}💰</div>
+                
+              </button>
+              <!-- Vanguard -->
+              <button
+                class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-indigo-500/50 hover:bg-white/10"
+                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.vanguard }"
+                :disabled="(humanPlayer?.gold || 0) < buildingCosts.vanguard"
+                @click="buildDefense('vanguard')">
+                <div class="text-2xl mb-1">⚔️</div>
+                <div class="font-bold text-sm">{{ t('ui.vanguard') }}</div>
+                <div class="text-xs text-amber-400">{{ buildingCosts.vanguard }}💰</div>
+                
+              </button>
+            </div>
+          </div>
+          
+          <!-- Kinh tế -->
+          <div class="mb-3">
+            <h3 class="text-sm font-bold text-white/80 mb-2 flex items-center gap-2">
+              <span>💰</span> Kinh tế
+            </h3>
+            <div class="grid grid-cols-2 gap-2">
+              <!-- ATM - Mua bằng LINH HỒN -->
+              <button
+                class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-purple-500/50 hover:bg-white/10"
+                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.souls || 0) < buildingCosts.atm }"
+                :disabled="(humanPlayer?.souls || 0) < buildingCosts.atm"
+                @click="buildDefense('atm')">
+                <div class="text-2xl mb-1">🏧</div>
+                <div class="font-bold text-sm">{{ t('ui.atm') }}</div>
+                <div class="text-xs text-purple-400">{{ buildingCosts.atm }}👻</div>
+                
+              </button>
+              <!-- Soul Collector -->
+              <button
+                class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-amber-500/50 hover:bg-white/10"
+                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.soulCollector }"
+                :disabled="(humanPlayer?.gold || 0) < buildingCosts.soulCollector"
+                @click="buildDefense('soul_collector')">
+                <div class="text-2xl mb-1">👻</div>
+                <div class="font-bold text-sm">{{ t('ui.soul') }}</div>
+                <div class="text-xs text-amber-400">{{ buildingCosts.soulCollector }}💰</div>
+                
+              </button>
+            </div>
+          </div>
+          
+          <p class="text-xs text-neutral-500 mt-3 text-center">Giá niêm yết, không trả giá!</p>
         </div>
       </div>
     </Transition>

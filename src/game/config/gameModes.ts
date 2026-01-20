@@ -5,15 +5,15 @@
  * CONFIGURATION RULES:
  * - Game modes can ONLY affect: entity counts, entity types, map composition
  * - Game modes MUST NOT modify: stats, upgrade values, costs, scaling formulas
- * - All balance values are defined in balance.ts and must not be duplicated here
+ * - All stats are pulled from entities (entityConfigs.ts)
  */
 
 import { GRID_CONSTANTS } from './constants'
 import { 
-  HERO_BALANCE, 
-  MONSTER_BALANCE, 
-  BED_BALANCE
-} from './balance'
+  DEFAULT_MONSTER_CONFIG,
+  DEFAULT_PLAYER_CONFIG,
+  DEFAULT_BED_CONFIG,
+} from './entityConfigs'
 
 // =============================================================================
 // GAME MODE TYPES
@@ -52,7 +52,7 @@ export interface MonsterModeConfig {
   count: number
   /** Monster variant (basic, elite, etc.) */
   variant: 'basic' | 'elite' | 'boss'
-  // Stats are pulled from MONSTER_BALANCE - not defined here
+  // Stats are pulled from entities (DEFAULT_MONSTER_CONFIG)
   maxHp: number
   baseDamage: number
   speed: number
@@ -86,7 +86,7 @@ export interface PlayerModeConfig {
   botCount: number
   /** Starting gold for all players */
   startingGold: number
-  // Stats are pulled from HERO_BALANCE - not defined here
+  // Stats are pulled from entities (DEFAULT_PLAYER_CONFIG)
   hp: number
   speed: number
   damage: number
@@ -123,7 +123,7 @@ export interface EconomyModeConfig {
   buildingCostMultiplier: number
   /** Multiplier for upgrade costs */
   upgradeCostMultiplier: number
-  /** Bed base income (from balance) */
+  /** Bed base income (from gameModeConfig) */
   bedBaseIncome: number
   /** Bed upgrade cost scale */
   bedUpgradeCostScale: number
@@ -175,35 +175,35 @@ export const EASY_MODE: GameModeConfig = {
     gridRows: 34, // 40 playable + 4 bottom padding
     cellSize: GRID_CONSTANTS.CELL_SIZE,
     roomCount: 7,
-    roomMinWidth: 6,
-    roomMaxWidth: 8,
-    roomMinHeight: 6,
-    roomMaxHeight: 8,
+    roomMinWidth: 8, // Expanded for ~28 build spots (6x6 interior = 36 - bed area ≈ 28)
+    roomMaxWidth: 10,
+    roomMinHeight: 8,
+    roomMaxHeight: 10,
     roomSizes: [
-      { width: 8, height: 8 },
-      { width: 8, height: 8 },
-      { width: 8, height: 10 },
-      { width: 10, height: 8 },
+      { width: 8, height: 8 },   // 6x6 interior = 36 spots - bed ≈ 28
+      { width: 10, height: 8 },  // 8x6 interior = 48 spots - bed ≈ 40
+      { width: 8, height: 10 },  // 6x8 interior = 48 spots - bed ≈ 40
+      { width: 10, height: 10 }, // 8x8 interior = 64 spots - bed ≈ 55
     ],
   },
   
   monster: {
     count: 1,
     variant: 'basic',
-    // Stats from MONSTER_BALANCE - no modifications
-    maxHp: MONSTER_BALANCE.MAX_HP,
-    baseDamage: MONSTER_BALANCE.BASE_DAMAGE,
-    speed: MONSTER_BALANCE.SPEED,
-    attackRange: MONSTER_BALANCE.ATTACK_RANGE,
-    attackCooldown: MONSTER_BALANCE.ATTACK_SPEED,
-    healThreshold: MONSTER_BALANCE.HEAL_THRESHOLD,
-    healRate: MONSTER_BALANCE.HEAL_RATE,
-    retreatSpeedBonus: MONSTER_BALANCE.RETREAT_SPEED_BONUS,
-    targetTimeout: 30,
-    damageScale: MONSTER_BALANCE.DAMAGE_SCALE,
-    hpScale: MONSTER_BALANCE.HP_SCALE,
-    baseLevelTime: MONSTER_BALANCE.BASE_LEVEL_TIME,
-    levelTimeIncrement: MONSTER_BALANCE.LEVEL_TIME_INCREMENT,
+    // Stats from entities (DEFAULT_MONSTER_CONFIG)
+    maxHp: DEFAULT_MONSTER_CONFIG.maxHp,
+    baseDamage: DEFAULT_MONSTER_CONFIG.baseDamage,
+    speed: DEFAULT_MONSTER_CONFIG.speed,
+    attackRange: DEFAULT_MONSTER_CONFIG.attackRange,
+    attackCooldown: DEFAULT_MONSTER_CONFIG.attackCooldown,
+    healThreshold: DEFAULT_MONSTER_CONFIG.healThreshold,
+    healRate: DEFAULT_MONSTER_CONFIG.healRate,
+    retreatSpeedBonus: DEFAULT_MONSTER_CONFIG.retreatSpeedBonus,
+    targetTimeout: DEFAULT_MONSTER_CONFIG.targetTimeout,
+    damageScale: DEFAULT_MONSTER_CONFIG.damageScale,
+    hpScale: DEFAULT_MONSTER_CONFIG.hpScale,
+    baseLevelTime: DEFAULT_MONSTER_CONFIG.baseLevelTime,
+    levelTimeIncrement: DEFAULT_MONSTER_CONFIG.levelTimeIncrement,
   },
   
   player: {
@@ -211,11 +211,11 @@ export const EASY_MODE: GameModeConfig = {
     humanCount: 1,
     botCount: 3,
     startingGold: 100,
-    // Stats from HERO_BALANCE - no modifications
-    hp: HERO_BALANCE.HP,
-    speed: HERO_BALANCE.SPEED,
-    damage: HERO_BALANCE.DAMAGE,
-    attackRange: HERO_BALANCE.ATTACK_RANGE,
+    // Stats from entities (DEFAULT_PLAYER_CONFIG)
+    hp: DEFAULT_PLAYER_CONFIG.maxHp,
+    speed: DEFAULT_PLAYER_CONFIG.speed,
+    damage: DEFAULT_PLAYER_CONFIG.damage,
+    attackRange: DEFAULT_PLAYER_CONFIG.attackRange,
   },
   
   healingPoints: {
@@ -242,7 +242,7 @@ export const EASY_MODE: GameModeConfig = {
   economy: {
     buildingCostMultiplier: 1.0,
     upgradeCostMultiplier: 1.0,
-    bedBaseIncome: BED_BALANCE.BASE_INCOME,
+    bedBaseIncome: DEFAULT_BED_CONFIG.baseIncome,
     bedUpgradeCostScale: 1.0,
   },
   
@@ -280,19 +280,19 @@ export const NORMAL_MODE: GameModeConfig = {
   monster: {
     count: 2,
     variant: 'basic',
-    maxHp: MONSTER_BALANCE.MAX_HP,
-    baseDamage: MONSTER_BALANCE.BASE_DAMAGE,
-    speed: MONSTER_BALANCE.SPEED,
-    attackRange: MONSTER_BALANCE.ATTACK_RANGE,
-    attackCooldown: MONSTER_BALANCE.ATTACK_SPEED,
-    healThreshold: MONSTER_BALANCE.HEAL_THRESHOLD,
-    healRate: MONSTER_BALANCE.HEAL_RATE,
-    retreatSpeedBonus: MONSTER_BALANCE.RETREAT_SPEED_BONUS,
-    targetTimeout: 30,
-    damageScale: MONSTER_BALANCE.DAMAGE_SCALE,
-    hpScale: MONSTER_BALANCE.HP_SCALE,
-    baseLevelTime: MONSTER_BALANCE.BASE_LEVEL_TIME,
-    levelTimeIncrement: MONSTER_BALANCE.LEVEL_TIME_INCREMENT,
+    maxHp: DEFAULT_MONSTER_CONFIG.maxHp,
+    baseDamage: DEFAULT_MONSTER_CONFIG.baseDamage,
+    speed: DEFAULT_MONSTER_CONFIG.speed,
+    attackRange: DEFAULT_MONSTER_CONFIG.attackRange,
+    attackCooldown: DEFAULT_MONSTER_CONFIG.attackCooldown,
+    healThreshold: DEFAULT_MONSTER_CONFIG.healThreshold,
+    healRate: DEFAULT_MONSTER_CONFIG.healRate,
+    retreatSpeedBonus: DEFAULT_MONSTER_CONFIG.retreatSpeedBonus,
+    targetTimeout: DEFAULT_MONSTER_CONFIG.targetTimeout,
+    damageScale: DEFAULT_MONSTER_CONFIG.damageScale,
+    hpScale: DEFAULT_MONSTER_CONFIG.hpScale,
+    baseLevelTime: DEFAULT_MONSTER_CONFIG.baseLevelTime,
+    levelTimeIncrement: DEFAULT_MONSTER_CONFIG.levelTimeIncrement,
   },
   
   player: {
@@ -300,10 +300,10 @@ export const NORMAL_MODE: GameModeConfig = {
     humanCount: 1,
     botCount: 4,
     startingGold: 70,
-    hp: HERO_BALANCE.HP,
-    speed: HERO_BALANCE.SPEED,
-    damage: HERO_BALANCE.DAMAGE,
-    attackRange: HERO_BALANCE.ATTACK_RANGE,
+    hp: DEFAULT_PLAYER_CONFIG.maxHp,
+    speed: DEFAULT_PLAYER_CONFIG.speed,
+    damage: DEFAULT_PLAYER_CONFIG.damage,
+    attackRange: DEFAULT_PLAYER_CONFIG.attackRange,
   },
   
   healingPoints: {
@@ -329,7 +329,7 @@ export const NORMAL_MODE: GameModeConfig = {
   economy: {
     buildingCostMultiplier: 1.0,
     upgradeCostMultiplier: 1.0,
-    bedBaseIncome: BED_BALANCE.BASE_INCOME,
+    bedBaseIncome: DEFAULT_BED_CONFIG.baseIncome,
     bedUpgradeCostScale: 1.0,
   },
   
@@ -367,19 +367,19 @@ export const HARD_MODE: GameModeConfig = {
   monster: {
     count: 3,
     variant: 'basic',
-    maxHp: MONSTER_BALANCE.MAX_HP,
-    baseDamage: MONSTER_BALANCE.BASE_DAMAGE,
-    speed: MONSTER_BALANCE.SPEED,
-    attackRange: MONSTER_BALANCE.ATTACK_RANGE,
-    attackCooldown: MONSTER_BALANCE.ATTACK_SPEED,
-    healThreshold: MONSTER_BALANCE.HEAL_THRESHOLD,
-    healRate: MONSTER_BALANCE.HEAL_RATE,
-    retreatSpeedBonus: MONSTER_BALANCE.RETREAT_SPEED_BONUS,
-    targetTimeout: 30,
-    damageScale: MONSTER_BALANCE.DAMAGE_SCALE,
-    hpScale: MONSTER_BALANCE.HP_SCALE,
-    baseLevelTime: MONSTER_BALANCE.BASE_LEVEL_TIME,
-    levelTimeIncrement: MONSTER_BALANCE.LEVEL_TIME_INCREMENT,
+    maxHp: DEFAULT_MONSTER_CONFIG.maxHp,
+    baseDamage: DEFAULT_MONSTER_CONFIG.baseDamage,
+    speed: DEFAULT_MONSTER_CONFIG.speed,
+    attackRange: DEFAULT_MONSTER_CONFIG.attackRange,
+    attackCooldown: DEFAULT_MONSTER_CONFIG.attackCooldown,
+    healThreshold: DEFAULT_MONSTER_CONFIG.healThreshold,
+    healRate: DEFAULT_MONSTER_CONFIG.healRate,
+    retreatSpeedBonus: DEFAULT_MONSTER_CONFIG.retreatSpeedBonus,
+    targetTimeout: DEFAULT_MONSTER_CONFIG.targetTimeout,
+    damageScale: DEFAULT_MONSTER_CONFIG.damageScale,
+    hpScale: DEFAULT_MONSTER_CONFIG.hpScale,
+    baseLevelTime: DEFAULT_MONSTER_CONFIG.baseLevelTime,
+    levelTimeIncrement: DEFAULT_MONSTER_CONFIG.levelTimeIncrement,
   },
   
   player: {
@@ -387,10 +387,10 @@ export const HARD_MODE: GameModeConfig = {
     humanCount: 1,
     botCount: 5,
     startingGold: 50,
-    hp: HERO_BALANCE.HP,
-    speed: HERO_BALANCE.SPEED,
-    damage: HERO_BALANCE.DAMAGE,
-    attackRange: HERO_BALANCE.ATTACK_RANGE,
+    hp: DEFAULT_PLAYER_CONFIG.maxHp,
+    speed: DEFAULT_PLAYER_CONFIG.speed,
+    damage: DEFAULT_PLAYER_CONFIG.damage,
+    attackRange: DEFAULT_PLAYER_CONFIG.attackRange,
   },
   
   healingPoints: {
@@ -417,7 +417,7 @@ export const HARD_MODE: GameModeConfig = {
   economy: {
     buildingCostMultiplier: 1.2,
     upgradeCostMultiplier: 1.2,
-    bedBaseIncome: BED_BALANCE.BASE_INCOME,
+    bedBaseIncome: DEFAULT_BED_CONFIG.baseIncome,
     bedUpgradeCostScale: 1.2,
   },
   

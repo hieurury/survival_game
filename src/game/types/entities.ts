@@ -128,6 +128,7 @@ export interface MonsterBase extends EntityBase {
   healZones: Vector2[]
   isRetreating: boolean
   isFullyHealing: boolean
+  healingInterrupted: boolean // Healing was interrupted due to low mana
   healIdleTimer: number
   
   // Aggression (0-1)
@@ -425,6 +426,7 @@ export function createMonsterBase(
     healZones: [],
     isRetreating: false,
     isFullyHealing: false,
+    healingInterrupted: false,
     healIdleTimer: 0,
     aggressiveness: config.aggressiveness,
   }

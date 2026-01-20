@@ -139,3 +139,19 @@ export const updateDoorRepair = (door: DoorRuntime, config: DoorConfig, deltaTim
   
   return false
 }
+
+// =============================================================================
+// DEFAULT DOOR CONFIG
+// =============================================================================
+export const DEFAULT_DOOR_CONFIG: DoorConfig = {
+  baseHp: 450,
+  hpScale: 2.0, // +100% HP per level
+  maxLevel: 10,
+  baseUpgradeCost: 40,
+  upgradeCostScale: 2.0, // Cost doubles each level
+  soulRequiredLevel: 5,
+  soulCost: 50, // Soul cost starting at level 5
+  repairDuration: 5, // 5 seconds to repair
+  repairCooldown: 30, // 30 seconds between repairs
+  repairPercent: 0.45, // Heals 45% of max HP
+}
