@@ -528,8 +528,8 @@ export function executeBuildStructure(
 export function executeUpgradeTurret(
   player: Player,
   turret: DefenseBuilding,
-  getBuildingDamage: (base: number, level: number) => number,
-  getBuildingRange: (base: number, level: number) => number,
+  getBuildingDamage: (base: number, level: number, type?: string) => number,
+  getBuildingRange: (base: number, level: number, type?: string) => number,
   cellSize: number
 ): BotActionResult {
   if (player.gold < turret.upgradeCost || turret.level >= 10) {
@@ -547,8 +547,8 @@ export function executeUpgradeTurret(
   
   player.gold -= turret.upgradeCost
   turret.level++
-  turret.damage = getBuildingDamage(turret.baseDamage, turret.level)
-  turret.range = getBuildingRange(turret.baseRange, turret.level)
+  turret.damage = getBuildingDamage(turret.baseDamage, turret.level, turret.type)
+  turret.range = getBuildingRange(turret.baseRange, turret.level, turret.type)
   turret.upgradeCost *= 2
   
   const pos = gridToWorld({ x: turret.gridX, y: turret.gridY }, cellSize)

@@ -69,7 +69,6 @@ export interface Room {
   doorIsRepairing: boolean
   doorRepairTimer: number
   ownerId: number | null
-  roomType: 'normal' | 'armory' | 'storage' | 'bunker'
   bedPosition: Vector2
   bedLevel: number
   bedUpgradeCost: number
@@ -79,6 +78,9 @@ export interface Room {
   doorPosition: Vector2
   doorGridX: number
   doorGridY: number
+  // Shape data for diverse room rendering
+  shapeCells: Vector2[]  // All cells of the room (relative to gridX, gridY)
+  interiorCells: Vector2[]  // Interior cells (walkable area)
 }
 
 export interface DefenseBuilding {
@@ -425,9 +427,10 @@ export const GAME_CONSTANTS = {
     UPGRADE_COST: DEFAULT_VANGUARD_CONFIG.upgradeCost,
   },
   
-  // Building upgrade scaling (from entities)
-  BUILDING_DAMAGE_SCALE: DEFAULT_TURRET_CONFIG.damageScale,
-  BUILDING_RANGE_SCALE: DEFAULT_TURRET_CONFIG.rangeScale,
+  // NOTE: damageScale and rangeScale are now per-building-type
+  // Use getBuildingConfig(type).damageScale/rangeScale instead
+  // BUILDING_DAMAGE_SCALE and BUILDING_RANGE_SCALE have been removed
+  // to avoid confusion - each entity has its own scale in entityConfigs.ts
   
   // Animation
   ANIMATION_SPEED: ANIMATION_CONFIG.SPEED,

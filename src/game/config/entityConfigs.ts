@@ -39,17 +39,20 @@ export {
 } from '../entities/structures/SoulCollector'
 
 // =============================================================================
-// ROOMS (Door, Bed)
+// DOORS
 // =============================================================================
 export { 
   DEFAULT_DOOR_CONFIG,
   type DoorConfig 
-} from '../entities/rooms/Door'
+} from '../entities/doors/Door'
 
+// =============================================================================
+// BEDS
+// =============================================================================
 export { 
   DEFAULT_BED_CONFIG,
   type BedConfig 
-} from '../entities/rooms/Bed'
+} from '../entities/beds/Bed'
 
 // =============================================================================
 // MONSTERS

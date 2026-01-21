@@ -4,6 +4,7 @@
  */
 import type { DefenseBuilding, Room, Player } from '../../types/game'
 import { GAME_CONSTANTS } from '../../types/game'
+import { getBuildingConfig, type BuildingType as EntityBuildingType } from '../config/entityConfigs'
 
 // =============================================================================
 // BUILDING TYPES - Match game.ts exactly
@@ -69,16 +70,21 @@ export function getUpgradeCost(building: DefenseBuilding): number {
 }
 
 // =============================================================================
-// BUILDING UPGRADE
+// BUILDING UPGRADE - Uses entity-specific scales
 // =============================================================================
 export function upgradeBuilding(building: DefenseBuilding): DefenseBuilding {
   const newLevel = building.level + 1
   const baseStats = GAME_CONSTANTS.BUILDINGS[building.type]
   
+  // Get entity config for this building type
+  const entityConfig = getBuildingConfig(building.type as EntityBuildingType)
+  const damageScale = ('damageScale' in entityConfig && entityConfig.damageScale) ? entityConfig.damageScale : 1.1
+  const rangeScale = ('rangeScale' in entityConfig && entityConfig.rangeScale) ? entityConfig.rangeScale : 1.2
+  
   // Calculate new stats
   const newMaxHp = Math.floor(baseStats.hp * Math.pow(1.3, newLevel - 1))
-  const newDamage = Math.floor(baseStats.damage * Math.pow(GAME_CONSTANTS.BUILDING_DAMAGE_SCALE, newLevel - 1))
-  const newRange = Math.floor(baseStats.range * Math.pow(GAME_CONSTANTS.BUILDING_RANGE_SCALE, newLevel - 1))
+  const newDamage = Math.floor(baseStats.damage * Math.pow(damageScale, newLevel - 1))
+  const newRange = Math.floor(baseStats.range * Math.pow(rangeScale, newLevel - 1))
   
   const upgraded: DefenseBuilding = {
     ...building,

@@ -20,8 +20,12 @@ export * from './weapons/index'
 
 // Rooms
 export * from './rooms/Room'
-export * from './rooms/Door'
-export * from './rooms/Bed'
+
+// Doors
+export * from './doors/Door'
+
+// Beds
+export * from './beds/Bed'
 
 // Traps
 export * from './traps/Trap'

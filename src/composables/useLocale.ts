@@ -86,14 +86,6 @@ export function getBuildingTypeName(type: string): string {
 }
 
 /**
- * Get room type name in Vietnamese
- */
-export function getRoomTypeName(type: string): string {
-  const typeKey = type as keyof typeof messages.value.roomTypes
-  return messages.value.roomTypes[typeKey] || type
-}
-
-/**
  * useLocale composable
  * Provides access to localization functions and current locale
  */
@@ -111,7 +103,6 @@ export function useLocale() {
     getLocale,
     messages,
     getBuildingTypeName,
-    getRoomTypeName,
   }
 }
 

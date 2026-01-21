@@ -36,7 +36,7 @@ export const vi_VN = {
     mustBeInRoom: 'Phải ở trong phòng mới ngủ được!',
     roomAlreadyClaimed: 'Phòng này đã có chủ rồi!',
     getCloserToBed: 'Lại gần giường hơn!',
-    claimedRoom: 'Đã chiếm phòng {roomId} ({roomType})!',
+    claimedRoom: 'Đã chiếm phòng {roomId}!',
 
     // Camera
     cameraFollowing: 'Camera đang theo người chơi',
@@ -170,16 +170,6 @@ export const vi_VN = {
     soul_collector: 'Máy thu hồn',
     vanguard: 'Tiên phong',
     smg: 'Súng tiểu liên',
-  },
-
-  // ============================================
-  // ROOM TYPE NAMES - Tên loại phòng
-  // ============================================
-  roomTypes: {
-    normal: 'Thường',
-    armory: 'Kho vũ khí',
-    storage: 'Kho chứa',
-    bunker: 'Hầm trú ẩn',
   },
 }
 

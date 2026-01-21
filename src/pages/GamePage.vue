@@ -3,8 +3,10 @@ import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { initAudio, playSfx, startBgm, stopBgm } from '../composables/useAudio'
 import { findPath, distance, moveTowards, gridToWorld } from '../composables/usePathfinding'
 import BotAI from '../composables/useBotAI'
-import { t, getBuildingTypeName, getRoomTypeName } from '../composables/useLocale'
+import { t, getBuildingTypeName } from '../composables/useLocale'
 import { useGameState } from '../composables/useGameState'
+import { ROOM_SHAPES, doesShapeOverlap, markShapeAsOccupied } from '../game/entities/rooms/RoomShapes'
+import { getBuildingConfig, type BuildingType } from '../game/config/entityConfigs'
 import type { 
   Room, Player, Monster, GamePhase, GridCell, 
   DefenseBuilding, Particle, Projectile, Vector2,
@@ -137,28 +139,21 @@ const initGrid = () => {
 // Rooms with beds and build spots
 const rooms = reactive<Room[]>([])
 
-// Generate non-overlapping rooms using zone-based placement
+// Generate non-overlapping rooms using diverse shapes (Rectangle, L, U, T)
 const initRooms = () => {
   rooms.length = 0
   const config = mapConfig.value
   const cellSize = config.cellSize
   const numRooms = config.roomCount
   
-  // Keep track of placed rooms to avoid overlap
-  const placedRooms: { gridX: number; gridY: number; width: number; height: number }[] = []
-  
-  // Room size from config
-  const roomWidth = config.roomMinWidth
-  const roomHeight = config.roomMinHeight
-  
-  // Room types
-  const roomTypes: ('normal' | 'armory' | 'storage' | 'bunker')[] = ['normal', 'armory', 'storage', 'bunker']
+  // Track occupied cells for collision detection
+  const occupiedCells = new Set<string>()
   
   // Map dimensions
   const gridCols = config.gridCols
   const gridRows = config.gridRows
-  const margin = 3 // Margin from map edges
-  const roomPadding = 3 // Space between rooms
+  const margin = 4 // Margin from map edges (increased for safety)
+  const roomPadding = 2 // Minimum space between rooms
   
   // Spawn zone (center of map)
   const sz = spawnZone.value
@@ -166,48 +161,20 @@ const initRooms = () => {
   // Healing point nests
   const nests = healingPointNests.value
   
-  // Helper: check if area overlaps with spawn zone (with padding)
-  const overlapsSpawnZone = (gx: number, gy: number, w: number, h: number): boolean => {
-    const padding = 3
-    return gx < sz.gridX + sz.width + padding &&
-           gx + w + padding > sz.gridX &&
-           gy < sz.gridY + sz.height + padding &&
-           gy + h + padding > sz.gridY
+  // Mark spawn zone as occupied
+  for (let y = sz.gridY - roomPadding; y < sz.gridY + sz.height + roomPadding; y++) {
+    for (let x = sz.gridX - roomPadding; x < sz.gridX + sz.width + roomPadding; x++) {
+      occupiedCells.add(`${x},${y}`)
+    }
   }
   
-  // Helper: check if area overlaps with monster nests (with padding)
-  const overlapsMonsterNest = (gx: number, gy: number, w: number, h: number): boolean => {
-    const padding = 3
-    for (const nest of nests) {
-      if (gx < nest.gridX + nest.width + padding &&
-          gx + w + padding > nest.gridX &&
-          gy < nest.gridY + nest.height + padding &&
-          gy + h + padding > nest.gridY) {
-        return true
+  // Mark monster nests as occupied
+  for (const nest of nests) {
+    for (let y = nest.gridY - roomPadding; y < nest.gridY + nest.height + roomPadding; y++) {
+      for (let x = nest.gridX - roomPadding; x < nest.gridX + nest.width + roomPadding; x++) {
+        occupiedCells.add(`${x},${y}`)
       }
     }
-    return false
-  }
-  
-  // Helper: check if room is within map bounds
-  const isWithinBounds = (gx: number, gy: number, w: number, h: number): boolean => {
-    return gx >= margin && 
-           gy >= margin && 
-           gx + w <= gridCols - margin && 
-           gy + h <= gridRows - margin
-  }
-  
-  // Helper: check if overlaps with existing rooms
-  const overlapsExistingRooms = (gx: number, gy: number, w: number, h: number): boolean => {
-    for (const existing of placedRooms) {
-      if (gx < existing.gridX + existing.width + roomPadding &&
-          gx + w + roomPadding > existing.gridX &&
-          gy < existing.gridY + existing.height + roomPadding &&
-          gy + h + roomPadding > existing.gridY) {
-        return true
-      }
-    }
-    return false
   }
   
   // Helper: determine best door side based on room position
@@ -227,174 +194,197 @@ const initRooms = () => {
     }
   }
   
-  // Generate candidate positions in a grid pattern around spawn zone
+  // Generate candidate positions covering the entire map
   const candidatePositions: { gridX: number; gridY: number }[] = []
+  const step = 3 // Check every 3 cells for potential positions
   
-  // Calculate available space
-  const availableWidth = gridCols - 2 * margin
-  const availableHeight = gridRows - 2 * margin
-  
-  // Create a grid of potential room positions
-  const stepX = roomWidth + roomPadding
-  const stepY = roomHeight + roomPadding
-  
-  for (let gy = margin; gy + roomHeight <= gridRows - margin; gy += stepY) {
-    for (let gx = margin; gx + roomWidth <= gridCols - margin; gx += stepX) {
-      // Skip if overlaps with spawn zone or nests
-      if (!overlapsSpawnZone(gx, gy, roomWidth, roomHeight) && 
-          !overlapsMonsterNest(gx, gy, roomWidth, roomHeight)) {
-        candidatePositions.push({ gridX: gx, gridY: gy })
-      }
+  for (let gy = margin; gy < gridRows - margin - 10; gy += step) {
+    for (let gx = margin; gx < gridCols - margin - 10; gx += step) {
+      candidatePositions.push({ gridX: gx, gridY: gy })
     }
   }
   
-  // Sort candidates by distance from spawn zone center (closer first for better distribution)
+  // Sort candidates by distance from spawn zone center (closer rooms first)
   const spawnCenterX = sz.gridX + sz.width / 2
   const spawnCenterY = sz.gridY + sz.height / 2
   
   candidatePositions.sort((a, b) => {
-    const distA = Math.sqrt(Math.pow(a.gridX + roomWidth/2 - spawnCenterX, 2) + Math.pow(a.gridY + roomHeight/2 - spawnCenterY, 2))
-    const distB = Math.sqrt(Math.pow(b.gridX + roomWidth/2 - spawnCenterX, 2) + Math.pow(b.gridY + roomHeight/2 - spawnCenterY, 2))
+    const distA = Math.sqrt(Math.pow(a.gridX - spawnCenterX, 2) + Math.pow(a.gridY - spawnCenterY, 2))
+    const distB = Math.sqrt(Math.pow(b.gridX - spawnCenterX, 2) + Math.pow(b.gridY - spawnCenterY, 2))
     return distA - distB
   })
   
-  // Shuffle a bit to add variety while keeping general distribution
+  // Shuffle with bias towards closer positions for variety
   for (let i = 0; i < candidatePositions.length - 1; i++) {
-    if (Math.random() < 0.3) {
-      const j = Math.min(i + 1 + Math.floor(Math.random() * 3), candidatePositions.length - 1)
+    if (Math.random() < 0.25) {
+      const j = Math.min(i + 1 + Math.floor(Math.random() * 5), candidatePositions.length - 1)
       const temp = candidatePositions[i]!
       candidatePositions[i] = candidatePositions[j]!
       candidatePositions[j] = temp
     }
   }
   
+  // Shuffle room shapes for variety
+  const shuffledShapes = [...ROOM_SHAPES].sort(() => Math.random() - 0.5)
+  
   // Place rooms from candidates
   let roomsPlaced = 0
+  let shapeIndex = 0
+  
   for (const pos of candidatePositions) {
     if (roomsPlaced >= numRooms) break
     
     const { gridX, gridY } = pos
-    const width = roomWidth
-    const height = roomHeight
     
-    // Double check all conditions
-    if (!isWithinBounds(gridX, gridY, width, height)) continue
-    if (overlapsSpawnZone(gridX, gridY, width, height)) continue
-    if (overlapsMonsterNest(gridX, gridY, width, height)) continue
-    if (overlapsExistingRooms(gridX, gridY, width, height)) continue
+    // Try different shapes at this position
+    let placed = false
+    const shapesToTry = 5 // Try up to 5 different shapes at each position
     
-    // Place room
-    const roomType = roomTypes[roomsPlaced % roomTypes.length] ?? 'normal'
-    const doorSide = getBestDoorSide(gridX, gridY, width, height)
-    
-    placedRooms.push({ gridX, gridY, width, height })
-    
-    // Calculate door position
-    let doorGridX: number = gridX + Math.floor(width / 2)
-    let doorGridY: number = gridY
-    switch (doorSide) {
-      case 'top':
-        doorGridX = gridX + Math.floor(width / 2)
-        doorGridY = gridY
-        break
-      case 'bottom':
-        doorGridX = gridX + Math.floor(width / 2)
-        doorGridY = gridY + height - 1
-        break
-      case 'left':
-        doorGridX = gridX
-        doorGridY = gridY + Math.floor(height / 2)
-        break
-      case 'right':
-        doorGridX = gridX + width - 1
-        doorGridY = gridY + Math.floor(height / 2)
-        break
-    }
-    
-    // Mark room cells on grid
-    for (let dy = 0; dy < height; dy++) {
-      for (let dx = 0; dx < width; dx++) {
-        const gx = gridX + dx
-        const gy = gridY + dy
+    for (let attempt = 0; attempt < shapesToTry && !placed; attempt++) {
+      const shape = shuffledShapes[(shapeIndex + attempt) % shuffledShapes.length]
+      if (!shape) continue
+      
+      // Check if shape fits at this position
+      if (doesShapeOverlap(shape, gridX, gridY, occupiedCells, gridCols, gridRows, margin)) {
+        continue
+      }
+      
+      // Shape fits! Place the room
+      const width = shape.boundingWidth
+      const height = shape.boundingHeight
+      
+      // Mark cells as occupied (with padding)
+      markShapeAsOccupied(shape, gridX, gridY, occupiedCells)
+      
+      // Add padding around the shape
+      for (const cell of shape.cells) {
+        const worldX = gridX + cell.x
+        const worldY = gridY + cell.y
+        for (let dy = -roomPadding; dy <= roomPadding; dy++) {
+          for (let dx = -roomPadding; dx <= roomPadding; dx++) {
+            occupiedCells.add(`${worldX + dx},${worldY + dy}`)
+          }
+        }
+      }
+      
+      // Determine best door position based on room location
+      const preferredDoorSide = getBestDoorSide(gridX, gridY, width, height)
+      
+      // Find door cell - prefer edge cells facing the map center
+      let doorCell = shape.doorCell
+      const edgeCells = shape.cells.filter(cell => {
+        const isInterior = shape.interiorCells.some(ic => ic.x === cell.x && ic.y === cell.y)
+        return !isInterior
+      })
+      
+      // Try to find a door on the preferred side
+      const doorCandidates = edgeCells.filter(cell => {
+        const hasInteriorNeighbor = shape.interiorCells.some(ic => 
+          (Math.abs(ic.x - cell.x) === 1 && ic.y === cell.y) ||
+          (Math.abs(ic.y - cell.y) === 1 && ic.x === cell.x)
+        )
+        if (!hasInteriorNeighbor) return false
+        
+        switch (preferredDoorSide) {
+          case 'bottom': return cell.y === height - 1 || cell.y > height / 2
+          case 'top': return cell.y === 0 || cell.y < height / 2
+          case 'right': return cell.x === width - 1 || cell.x > width / 2
+          case 'left': return cell.x === 0 || cell.x < width / 2
+        }
+        return true
+      })
+      
+      if (doorCandidates.length > 0) {
+        doorCell = doorCandidates[Math.floor(Math.random() * doorCandidates.length)]!
+      }
+      
+      const doorGridX = gridX + doorCell.x
+      const doorGridY = gridY + doorCell.y
+      
+      // Mark room cells on grid
+      for (const cell of shape.cells) {
+        const gx = gridX + cell.x
+        const gy = gridY + cell.y
         
         if (!grid[gy] || !grid[gy][gx]) continue
         
         const isDoorCell = gx === doorGridX && gy === doorGridY
-        const isEdge = dx === 0 || dx === width - 1 || dy === 0 || dy === height - 1
+        const isInterior = shape.interiorCells.some(ic => 
+          gridX + ic.x === gx && gridY + ic.y === gy
+        )
         
         if (isDoorCell) {
           grid[gy][gx] = { x: gx, y: gy, type: 'door', roomId: roomsPlaced, walkable: true }
-        } else if (isEdge) {
-          grid[gy][gx] = { x: gx, y: gy, type: 'wall', roomId: roomsPlaced, walkable: false }
-        } else {
+        } else if (isInterior) {
           grid[gy][gx] = { x: gx, y: gy, type: 'room', roomId: roomsPlaced, walkable: true }
+        } else {
+          grid[gy][gx] = { x: gx, y: gy, type: 'wall', roomId: roomsPlaced, walkable: false }
         }
       }
+      
+      // Room HP - same for all rooms
+      const baseHp = GAME_CONSTANTS.BASE_DOOR_HP
+      
+      // Bed position from shape definition
+      const bedCell = shape.bedCell
+      const bedX = (gridX + bedCell.x) * cellSize + cellSize / 2
+      const bedY = (gridY + bedCell.y) * cellSize + cellSize / 2
+      
+      // Build spots from shape definition (excluding bed position)
+      const buildSpots: Vector2[] = shape.buildSpots.map(spot => ({
+        x: (gridX + spot.x) * cellSize + cellSize / 2,
+        y: (gridY + spot.y) * cellSize + cellSize / 2
+      }))
+      
+      // Door position in pixels
+      const doorX = doorGridX * cellSize + cellSize / 2
+      const doorY = doorGridY * cellSize + cellSize / 2
+      
+      // Calculate center based on actual cells
+      const avgX = shape.cells.reduce((sum, c) => sum + c.x, 0) / shape.cells.length
+      const avgY = shape.cells.reduce((sum, c) => sum + c.y, 0) / shape.cells.length
+      
+      rooms.push({
+        id: roomsPlaced,
+        gridX,
+        gridY,
+        width,
+        height,
+        centerX: (gridX + avgX) * cellSize + cellSize / 2,
+        centerY: (gridY + avgY) * cellSize + cellSize / 2,
+        doorHp: baseHp,
+        doorMaxHp: baseHp,
+        doorLevel: 1,
+        doorUpgradeCost: 40,
+        doorSoulCost: 0,
+        doorRepairCooldown: 0,
+        doorIsRepairing: false,
+        doorRepairTimer: 0,
+        ownerId: null,
+        bedPosition: { x: bedX, y: bedY },
+        bedLevel: 1,
+        bedUpgradeCost: 25,
+        bedSoulCost: 0,
+        bedIncome: economyConfig.value.bedBaseIncome,
+        buildSpots,
+        doorPosition: { x: doorX, y: doorY },
+        doorGridX,
+        doorGridY,
+        // Store shape data for proper rendering
+        shapeCells: shape.cells.map(c => ({ x: c.x, y: c.y })),
+        interiorCells: shape.interiorCells.map(c => ({ x: c.x, y: c.y }))
+      })
+      
+      roomsPlaced++
+      shapeIndex = (shapeIndex + 1) % shuffledShapes.length
+      placed = true
     }
-    
-    // Room HP based on type
-    const typeMultiplier = roomType === 'bunker' ? 1.5 : roomType === 'armory' ? 1.2 : 1
-    const baseHp = Math.floor(GAME_CONSTANTS.BASE_DOOR_HP * typeMultiplier)
-    
-    // Bed position (center of room interior)
-    const interiorCenterX = gridX + Math.floor(width / 2)
-    const interiorCenterY = gridY + Math.floor(height / 2)
-    const bedX = interiorCenterX * cellSize + cellSize / 2
-    const bedY = interiorCenterY * cellSize + cellSize / 2
-    
-    // Build spots - all interior cells with minimum distance from bed
-    const buildSpots: Vector2[] = []
-    for (let dy = 1; dy < height - 1; dy++) {
-      for (let dx = 1; dx < width - 1; dx++) {
-        const spotX = (gridX + dx) * cellSize + cellSize / 2
-        const spotY = (gridY + dy) * cellSize + cellSize / 2
-        // Keep minimum distance from bed (1 cell = 48px)
-        if (Math.abs(spotX - bedX) > 40 || Math.abs(spotY - bedY) > 40) {
-          buildSpots.push({ x: spotX, y: spotY })
-        }
-      }
-    }
-    
-    // Door position in pixels
-    const doorX = doorGridX * cellSize + cellSize / 2
-    const doorY = doorGridY * cellSize + cellSize / 2
-    
-    rooms.push({
-      id: roomsPlaced,
-      gridX,
-      gridY,
-      width,
-      height,
-      centerX: (gridX + width / 2) * cellSize,
-      centerY: (gridY + height / 2) * cellSize,
-      doorHp: baseHp,
-      doorMaxHp: baseHp,
-      doorLevel: 1,
-      doorUpgradeCost: 40, // DOOR_BALANCE.BASE_UPGRADE_COST
-      doorSoulCost: 0, // No soul cost at level 1
-      doorRepairCooldown: 0,
-      doorIsRepairing: false,
-      doorRepairTimer: 0,
-      ownerId: null,
-      roomType,
-      bedPosition: { x: bedX, y: bedY },
-      bedLevel: 1,
-      bedUpgradeCost: 25, // BED_BALANCE.BASE_UPGRADE_COST
-      bedSoulCost: 0, // No soul cost at level 1
-      bedIncome: economyConfig.value.bedBaseIncome,
-      buildSpots,
-      doorPosition: { x: doorX, y: doorY },
-      doorGridX,
-      doorGridY
-    })
-    
-    roomsPlaced++
   }
   
   // Log result
-  console.log(`Room placement: ${roomsPlaced}/${numRooms} rooms placed`)
+  console.log(`Room placement: ${roomsPlaced}/${numRooms} rooms placed (diverse shapes)`)
   if (roomsPlaced < numRooms) {
-    console.warn(`Could not place all rooms! Candidates available: ${candidatePositions.length}`)
+    console.warn(`Could not place all rooms! Try reducing room count or increasing map size.`)
   }
   
   // Final validation: ensure we have enough rooms for players
@@ -693,13 +683,17 @@ const getGoldPerSecond = (room: Room): number => {
   return room.bedIncome || GAME_CONSTANTS.BED_BASE_INCOME
 }
 
-// Calculate building stats based on level
-const getBuildingDamage = (baseDamage: number, level: number): number => {
-  return Math.floor(baseDamage * Math.pow(GAME_CONSTANTS.BUILDING_DAMAGE_SCALE, level - 1))
+// Calculate building stats based on level - uses entity-specific scales
+const getBuildingDamage = (baseDamage: number, level: number, buildingType: string = 'turret'): number => {
+  const config = getBuildingConfig(buildingType as BuildingType)
+  const damageScale = ('damageScale' in config && config.damageScale) ? config.damageScale : 1.1
+  return Math.floor(baseDamage * Math.pow(damageScale, level - 1))
 }
 
-const getBuildingRange = (baseRange: number, level: number): number => {
-  return Math.floor(baseRange * Math.pow(GAME_CONSTANTS.BUILDING_RANGE_SCALE, level - 1))
+const getBuildingRange = (baseRange: number, level: number, buildingType: string = 'turret'): number => {
+  const config = getBuildingConfig(buildingType as BuildingType)
+  const rangeScale = ('rangeScale' in config && config.rangeScale) ? config.rangeScale : 1.2
+  return Math.floor(baseRange * Math.pow(rangeScale, level - 1))
 }
 
 /**
@@ -1116,7 +1110,7 @@ const goToSleep = () => {
     if (currentRoom.ownerId === null) {
       currentRoom.ownerId = humanPlayer.value.id
       humanPlayer.value.roomId = currentRoom.id
-      addMessage(t('messages.claimedRoom', { roomId: currentRoom.id, roomType: getRoomTypeName(currentRoom.roomType) }))
+      addMessage(t('messages.claimedRoom', { roomId: currentRoom.id }))
     }
     
     // Auto-position player on the bed
@@ -1582,14 +1576,14 @@ const upgradeBuilding = () => {
   
   building.level++
   
-  // Turret: +10% damage, +20% range
+  // Turret: use entity-specific scales from DEFAULT_TURRET_CONFIG
   if (building.type === 'turret') {
-    building.damage = Math.floor(building.baseDamage * Math.pow(1.1, building.level - 1))
-    building.range = Math.floor(building.baseRange * Math.pow(1.2, building.level - 1))
+    building.damage = getBuildingDamage(building.baseDamage, building.level, 'turret')
+    building.range = getBuildingRange(building.baseRange, building.level, 'turret')
   } else if (building.type === 'smg') {
-    // SMG: +10% damage, +20% range (same as turret)
-    building.damage = Math.floor(building.baseDamage * Math.pow(1.1, building.level - 1))
-    building.range = Math.floor(building.baseRange * Math.pow(1.2, building.level - 1))
+    // SMG: use entity-specific scales from DEFAULT_SMG_CONFIG (damageScale: 1.5, rangeScale: 1.3)
+    building.damage = getBuildingDamage(building.baseDamage, building.level, 'smg')
+    building.range = getBuildingRange(building.baseRange, building.level, 'smg')
     // SMG requires additional soul cost from level 5+
     if (building.level >= GAME_CONSTANTS.SMG.SOUL_REQUIRED_LEVEL) {
       building.soulCost = GAME_CONSTANTS.SMG.SOUL_COST
@@ -1605,9 +1599,9 @@ const upgradeBuilding = () => {
     spawnVanguardUnits(building)
     addMessage(t('messages.vanguardUpgraded', { units: getVanguardUnitCount(building.level) }))
   } else {
-    // Other buildings: standard scaling
-    building.damage = getBuildingDamage(building.baseDamage, building.level)
-    building.range = getBuildingRange(building.baseRange, building.level)
+    // Other buildings: standard scaling - use entity-specific scales
+    building.damage = getBuildingDamage(building.baseDamage, building.level, building.type as BuildingType)
+    building.range = getBuildingRange(building.baseRange, building.level, building.type as BuildingType)
   }
   
   // Double the upgrade cost
@@ -1829,19 +1823,27 @@ const updateMonsterAI = (deltaTime: number) => {
       let targetHealingPoint = getLockedHealingPoint()
       
       // Check if locked point is below minimum mana threshold (< 10%)
-      // Monster abandons healing point when mana drops below threshold
+      // Monster IMMEDIATELY stops retreating and resumes attack when mana depleted
+      // IMPORTANT: Monster does NOT look for another healing point - it fights!
       const minManaThresholdForRetreat = targetHealingPoint 
         ? targetHealingPoint.maxManaPower * hConfig.minManaPercent 
         : 0
       if (targetHealingPoint && targetHealingPoint.manaPower < minManaThresholdForRetreat) {
-        // Locked point mana below threshold - clear it and find new one
-        monster.targetHealingPointId = null
-        targetHealingPoint = null
+        // Locked point mana below threshold - STOP retreating immediately, resume attack
         spawnFloatingText(monster.position, '⚡ Mana < 10%!', '#fbbf24', 14)
+        monster.isFullyHealing = false
+        monster.isRetreating = false
+        monster.targetHealingPointId = null
+        monster.speed = monster.baseSpeed
+        monster.healingInterrupted = true
+        monster.monsterState = 're-engage'
+        addMessage(t('messages.healingPointDepleted'))
+        // Fall through to normal AI behavior - monster will attack
+        targetHealingPoint = null
       }
       
-      // If no locked point, find a new one (using minMana threshold)
-      if (!targetHealingPoint) {
+      // If no locked point, find a new one (only if not healing interrupted)
+      if (!targetHealingPoint && !monster.healingInterrupted) {
         targetHealingPoint = findNearestHealingPoint()
         if (targetHealingPoint) {
           // Lock onto this healing point
@@ -1850,7 +1852,8 @@ const updateMonsterAI = (deltaTime: number) => {
       }
       
       // If no healing point has sufficient mana, stop retreating and resume combat
-      if (!targetHealingPoint) {
+      // Note: Skip if healingInterrupted is already true (already handled above)
+      if (!targetHealingPoint && !monster.healingInterrupted) {
         if (monster.isFullyHealing || monster.isRetreating) {
           addMessage(t('messages.healingPointsExhausted'))
           spawnFloatingText(monster.position, '⚡ No Mana!', '#ef4444', 14)
@@ -1863,7 +1866,7 @@ const updateMonsterAI = (deltaTime: number) => {
         // Mark healing as interrupted - monster won't try to retreat again until mana is available
         monster.healingInterrupted = true
         // Fall through to normal AI behavior below
-      } else {
+      } else if (targetHealingPoint) {
         // Set retreat state if not already retreating
         if (!monster.isRetreating && !monster.isFullyHealing) {
           monster.isRetreating = true
@@ -1898,10 +1901,9 @@ const updateMonsterAI = (deltaTime: number) => {
             monster.isRetreating = false
             monster.targetHealingPointId = null
             monster.speed = monster.baseSpeed
-            // Mark that healing was interrupted while HP still low
-            // BUT only if there's another healing point with mana available
-            const hpRatio = monster.hp / monster.maxHp
-            monster.healingInterrupted = hpRatio < mConfig.healThreshold && hasAnyHealingPointWithMana()
+            // Mark healing as interrupted - monster will NOT look for another healing point
+            // It will resume attack immediately, regardless of whether other healing points have mana
+            monster.healingInterrupted = true
             monster.monsterState = 're-engage'
             addMessage(t('messages.healingPointDepleted'))
             continue // Skip to next monster
@@ -2481,8 +2483,8 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
           if (player.gold < upgradableSMG.upgradeCost) return false
           player.gold -= upgradableSMG.upgradeCost
           upgradableSMG.level++
-          upgradableSMG.damage = getBuildingDamage(upgradableSMG.baseDamage, upgradableSMG.level)
-          upgradableSMG.range = getBuildingRange(upgradableSMG.baseRange, upgradableSMG.level)
+          upgradableSMG.damage = getBuildingDamage(upgradableSMG.baseDamage, upgradableSMG.level, 'smg')
+          upgradableSMG.range = getBuildingRange(upgradableSMG.baseRange, upgradableSMG.level, 'smg')
           upgradableSMG.upgradeCost *= 2
           const pos = gridToWorld({ x: upgradableSMG.gridX, y: upgradableSMG.gridY }, GAME_CONSTANTS.CELL_SIZE)
           spawnFloatingText(pos, `🔥 LV${upgradableSMG.level}!`, '#f97316', 12)
@@ -3020,9 +3022,9 @@ const updateBuildings = (deltaTime: number) => {
     building.animationFrame += deltaTime * 8
     
     const buildingPos = gridToWorld({ x: building.gridX, y: building.gridY }, cellSize)
-    // Calculate actual damage and range based on level
-    const actualDamage = getBuildingDamage(building.baseDamage, building.level)
-    const actualRange = getBuildingRange(building.baseRange, building.level)
+    // Calculate actual damage and range based on level - use entity-specific scales
+    const actualDamage = getBuildingDamage(building.baseDamage, building.level, building.type as BuildingType)
+    const actualRange = getBuildingRange(building.baseRange, building.level, building.type as BuildingType)
     
     // Find nearest alive monster in range
     let targetMonster: Monster | null = null
@@ -3464,14 +3466,8 @@ const render = () => {
           ctx.fillStyle = '#1a1a2e'
           break
         case 'room': {
-          const room = cell.roomId !== undefined ? rooms[cell.roomId] : null
-          const roomColors: Record<string, string> = { 
-            normal: '#2a2a3e', 
-            armory: '#3a2a2a', 
-            storage: '#2a3a2a', 
-            bunker: '#3a3a4a' 
-          }
-          ctx.fillStyle = room ? (roomColors[room.roomType] || '#2a2a3e') : '#2a2a3e'
+          // All rooms have the same color
+          ctx.fillStyle = '#2a2a3e'
           break
         }
         case 'wall': {
@@ -3603,19 +3599,50 @@ const render = () => {
   // Draw rooms with details
   rooms.forEach(room => {
     if (!ctx) return
-    const px = room.gridX * cellSize
-    const py = room.gridY * cellSize
-    const width = room.width * cellSize
-    const height = room.height * cellSize
     
     // Check if door should be closed (someone sleeping inside)
     const hasSleepingPlayer = players.some(p => p.alive && p.roomId === room.id && p.isSleeping)
     const isDoorClosed = hasSleepingPlayer && room.doorHp > 0
     
-    // Room border
-    ctx.strokeStyle = room.ownerId !== null ? players[room.ownerId]?.color || '#555' : '#333'
+    // Draw room border following actual shape (for L, U, T shapes)
+    const ownerColor = room.ownerId !== null ? players[room.ownerId]?.color || '#555' : '#333'
+    ctx.strokeStyle = ownerColor
     ctx.lineWidth = 4
-    ctx.strokeRect(px, py, width, height)
+    
+    // For each cell in shape, draw edges that don't have neighbors (outer border)
+    room.shapeCells.forEach(cell => {
+      if (!ctx) return
+      const worldX = room.gridX + cell.x
+      const worldY = room.gridY + cell.y
+      const cellPx = worldX * cellSize
+      const cellPy = worldY * cellSize
+      
+      // Check which neighbors exist in the shape
+      const hasTop = room.shapeCells.some(c => c.x === cell.x && c.y === cell.y - 1)
+      const hasBottom = room.shapeCells.some(c => c.x === cell.x && c.y === cell.y + 1)
+      const hasLeft = room.shapeCells.some(c => c.x === cell.x - 1 && c.y === cell.y)
+      const hasRight = room.shapeCells.some(c => c.x === cell.x + 1 && c.y === cell.y)
+      
+      // Draw edges where there's no neighbor (outer border)
+      ctx.beginPath()
+      if (!hasTop) {
+        ctx.moveTo(cellPx, cellPy)
+        ctx.lineTo(cellPx + cellSize, cellPy)
+      }
+      if (!hasBottom) {
+        ctx.moveTo(cellPx, cellPy + cellSize)
+        ctx.lineTo(cellPx + cellSize, cellPy + cellSize)
+      }
+      if (!hasLeft) {
+        ctx.moveTo(cellPx, cellPy)
+        ctx.lineTo(cellPx, cellPy + cellSize)
+      }
+      if (!hasRight) {
+        ctx.moveTo(cellPx + cellSize, cellPy)
+        ctx.lineTo(cellPx + cellSize, cellPy + cellSize)
+      }
+      ctx.stroke()
+    })
     
     // Door position (use actual door grid position)
     const doorPx = room.doorGridX * cellSize
@@ -3693,10 +3720,11 @@ const render = () => {
     ctx.lineWidth = 1
     ctx.strokeRect(doorBarX, doorBarY, doorBarWidth, doorBarHeight)
     
-    // Room type icon
-    const icons: Record<string, string> = { normal: '🏠', armory: '⚔️', storage: '📦', bunker: '🛡️' }
+    // Room icon - draw near bed position (center of interior)
     ctx.font = '20px Arial'
-    ctx.fillText(icons[room.roomType] || '🏠', px + 20, py + 30)
+    ctx.textAlign = 'center'
+    // Use room center which is calculated from actual shape cells
+    ctx.fillText('🏠', room.centerX, room.centerY - cellSize)
     
     // Bed
     ctx.fillStyle = '#5a4a3a'

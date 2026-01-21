@@ -30,7 +30,6 @@ export interface GridCell {
 // =============================================================================
 // ROOM TYPES
 // =============================================================================
-export type RoomType = 'normal' | 'armory' | 'storage' | 'bunker'
 export type DoorSide = 'top' | 'bottom' | 'left' | 'right'
 
 export interface Room {
@@ -49,7 +48,6 @@ export interface Room {
   doorIsRepairing: boolean
   doorRepairTimer: number
   ownerId: number | null
-  roomType: RoomType
   bedPosition: Vector2
   bedLevel: number
   bedUpgradeCost: number

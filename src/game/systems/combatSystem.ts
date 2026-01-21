@@ -4,17 +4,22 @@
  */
 import type { Player, Monster, DefenseBuilding, Projectile, VanguardUnit, Vector2 } from '../../types/game'
 import { GAME_CONSTANTS } from '../../types/game'
+import { getBuildingConfig, type BuildingType } from '../config/entityConfigs'
 import { distance, moveTowards, gridToWorld } from '../../composables/usePathfinding'
 
 // =============================================================================
-// DAMAGE CALCULATION
+// DAMAGE CALCULATION - Uses entity-specific scales
 // =============================================================================
-export function getBuildingDamage(baseDamage: number, level: number): number {
-  return Math.floor(baseDamage * Math.pow(GAME_CONSTANTS.BUILDING_DAMAGE_SCALE, level - 1))
+export function getBuildingDamage(baseDamage: number, level: number, buildingType: string = 'turret'): number {
+  const config = getBuildingConfig(buildingType as BuildingType)
+  const damageScale = ('damageScale' in config && config.damageScale) ? config.damageScale : 1.1
+  return Math.floor(baseDamage * Math.pow(damageScale, level - 1))
 }
 
-export function getBuildingRange(baseRange: number, level: number): number {
-  return Math.floor(baseRange * Math.pow(GAME_CONSTANTS.BUILDING_RANGE_SCALE, level - 1))
+export function getBuildingRange(baseRange: number, level: number, buildingType: string = 'turret'): number {
+  const config = getBuildingConfig(buildingType as BuildingType)
+  const rangeScale = ('rangeScale' in config && config.rangeScale) ? config.rangeScale : 1.2
+  return Math.floor(baseRange * Math.pow(rangeScale, level - 1))
 }
 
 export function getMonsterDamage(baseDamage: number, level: number): number {

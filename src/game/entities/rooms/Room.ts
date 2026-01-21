@@ -1,30 +1,25 @@
 /**
  * Room System
  * Base class for shelter areas
+ * Rooms only differ by size, doors and beds are the same for all rooms
  */
 
 import type { Vector2 } from '../../../types/game'
 
 // =============================================================================
-// ROOM TYPE
-// =============================================================================
-export type RoomType = 'standard' | 'large' | 'l_shape' | 'bunker' | 'armory' | 'storage'
-
-// =============================================================================
 // ROOM CONFIG
 // =============================================================================
 export interface RoomConfig {
-  type: RoomType
   minWidth: number
   maxWidth: number
   minHeight: number
   maxHeight: number
   buildSlotCount: number
-  // Door config
+  // Door config (same for all rooms)
   baseDoorHp: number
   doorHpScale: number
   maxDoorLevel: number
-  // Bed config
+  // Bed config (same for all rooms)
   bedBaseIncome: number
   bedIncomeScale: number
   maxBedLevel: number
@@ -46,7 +41,6 @@ export interface RoomLayout {
 // =============================================================================
 export interface RoomRuntime {
   id: number
-  type: RoomType
   // Grid position
   gridX: number
   gridY: number
@@ -133,7 +127,6 @@ export const createRoom = (
   
   return {
     id,
-    type: config.type,
     gridX,
     gridY,
     width: layout.width,
@@ -161,15 +154,13 @@ export const createRoom = (
   }
 }
 
-// Door upgrade functions are now in Door.ts - single source of truth
-// Bed upgrade functions are now in Bed.ts - single source of truth
-// Import them from './Door' and './Bed' if needed
+// Door upgrade functions are now in ../doors/Door.ts - single source of truth
+// Bed upgrade functions are now in ../beds/Bed.ts - single source of truth
 
 // =============================================================================
 // DEFAULT ROOM CONFIG
 // =============================================================================
 export const DEFAULT_ROOM_CONFIG: RoomConfig = {
-  type: 'standard',
   minWidth: 8,
   maxWidth: 10,
   minHeight: 8,
@@ -181,37 +172,4 @@ export const DEFAULT_ROOM_CONFIG: RoomConfig = {
   bedBaseIncome: 1, // From BED_BALANCE.BASE_INCOME
   bedIncomeScale: 2.0, // From BED_BALANCE.INCOME_SCALE
   maxBedLevel: 10,
-}
-
-// =============================================================================
-// ROOM TYPE PRESETS
-// =============================================================================
-export const ROOM_TYPE_CONFIGS: Record<RoomType, Partial<RoomConfig>> = {
-  standard: {},
-  large: {
-    minWidth: 10,
-    maxWidth: 12,
-    minHeight: 10,
-    maxHeight: 12,
-    buildSlotCount: 6,
-  },
-  l_shape: {
-    minWidth: 10,
-    maxWidth: 12,
-    minHeight: 10,
-    maxHeight: 12,
-    buildSlotCount: 5,
-  },
-  bunker: {
-    baseDoorHp: 600,
-    doorHpScale: 1.6,
-    buildSlotCount: 3,
-  },
-  armory: {
-    buildSlotCount: 6,
-  },
-  storage: {
-    bedIncomeScale: 2.5,
-    buildSlotCount: 2,
-  },
 }
