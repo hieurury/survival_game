@@ -72,7 +72,7 @@ export function upgradeBuilding(building: DefenseBuilding): DefenseBuilding {
   const baseStats = GAME_CONSTANTS.BUILDINGS[building.type]
   
   // Get entity config for this building type
-  const entityConfig = getBuildingConfig(building.type as EntityBuildingType)
+  const entityConfig = getBuildingConfig(building.type as BuildingType)
   const damageScale = ('damageScale' in entityConfig && entityConfig.damageScale) ? entityConfig.damageScale : 1.1
   const rangeScale = ('rangeScale' in entityConfig && entityConfig.rangeScale) ? entityConfig.rangeScale : 1.2
   
