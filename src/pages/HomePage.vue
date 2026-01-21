@@ -55,7 +55,7 @@ const openHowToPlay = () => {
 </script>
 
 <template>
-  <div class="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-neutral-950">
+  <div class="relative flex min-h-screen min-h-[100dvh] flex-col items-center justify-center overflow-hidden bg-neutral-950">
     <!-- Background atmosphere -->
     <div class="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_rgba(139,0,0,0.15),_transparent_50%)]"></div>
     <div class="absolute inset-0 bg-[radial-gradient(ellipse_at_bottom,_rgba(0,0,0,0.8),_transparent_70%)]"></div>

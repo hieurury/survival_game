@@ -71,6 +71,7 @@ const gameOver = ref(false)
 const victory = ref(false)
 const messageLog = ref<string[]>([])
 const showBuildPopup = ref(false)
+const buildPopupInteractive = ref(false) // Prevents accidental touches when popup opens
 const buildTab = ref<'defense' | 'economy'>('defense') // Tab state for build popup
 const selectedBuildSpot = ref<{ x: number; y: number; roomId: number } | null>(null)
 const goldAccumulator = reactive<{ [key: number]: number }>({}) // Tracks partial gold per player
@@ -1072,7 +1073,9 @@ const handleTouchTap = (x: number, y: number) => {
               y: Math.floor(spot.y / GAME_CONSTANTS.CELL_SIZE),
               roomId: myRoom.id
             }
+            buildPopupInteractive.value = false
             showBuildPopup.value = true
+            setTimeout(() => { buildPopupInteractive.value = true }, 300)
             playSfx('click')
             return
           }
@@ -1187,7 +1190,9 @@ const handleCanvasClick = (e: MouseEvent) => {
               y: Math.floor(spot.y / GAME_CONSTANTS.CELL_SIZE),
               roomId: myRoom.id
             }
+            buildPopupInteractive.value = false
             showBuildPopup.value = true
+            setTimeout(() => { buildPopupInteractive.value = true }, 300)
             playSfx('click')
             return
           } else {
@@ -1452,6 +1457,7 @@ const buildDefense = (type: DefenseBuilding['type']) => {
   addMessage(t('messages.builtInRoom', { type: getBuildingTypeName(type), roomId: roomId }))
   
   showBuildPopup.value = false
+  buildPopupInteractive.value = false
   selectedBuildSpot.value = null
 }
 
@@ -2550,12 +2556,14 @@ const updateMonsterAI = (deltaTime: number) => {
           spawnParticles(bPos, 'explosion', 15, '#ff6b6b')
           
           // Mark the build spot as destroyed (cannot rebuild)
+          // Use cellSize/2 as threshold to ensure accurate matching
+          const threshold = cellSize / 2
           const ownerRoom = rooms.find(r => r.buildSpots.some(spot => 
-            Math.abs(spot.x - bPos.x) < 30 && Math.abs(spot.y - bPos.y) < 30
+            Math.abs(spot.x - bPos.x) < threshold && Math.abs(spot.y - bPos.y) < threshold
           ))
           if (ownerRoom) {
             const destroyedSpot = ownerRoom.buildSpots.find(spot =>
-              Math.abs(spot.x - bPos.x) < 30 && Math.abs(spot.y - bPos.y) < 30
+              Math.abs(spot.x - bPos.x) < threshold && Math.abs(spot.y - bPos.y) < threshold
             )
             if (destroyedSpot) {
               destroyedSpot.isDestroyed = true
@@ -2583,6 +2591,9 @@ const updateMonsterAI = (deltaTime: number) => {
           
           if (playerRoom.doorHp <= 0) {
             playerRoom.doorHp = 0
+            // Cancel repair if in progress
+            playerRoom.doorIsRepairing = false
+            playerRoom.doorRepairTimer = 0
             addMessage(t('messages.roomDoorDestroyed', { roomId: playerRoom.id }))
             spawnFloatingText(doorPos, '💥 DESTROYED!', '#ff6b6b', 20)
           }
@@ -3813,8 +3824,8 @@ const gameLoop = (timestamp: number) => {
         room.doorRepairCooldown -= deltaTime
       }
       
-      // Door repair in progress
-      if (room.doorIsRepairing) {
+      // Door repair in progress - only if door still has HP
+      if (room.doorIsRepairing && room.doorHp > 0) {
         room.doorRepairTimer += deltaTime
         const healPerSecond = (room.doorMaxHp * GAME_CONSTANTS.DOOR_REPAIR_PERCENT) / GAME_CONSTANTS.DOOR_REPAIR_DURATION
         room.doorHp = Math.min(room.doorMaxHp, room.doorHp + healPerSecond * deltaTime)
@@ -3830,6 +3841,10 @@ const gameLoop = (timestamp: number) => {
             addMessage(t('messages.doorRepairComplete'))
           }
         }
+      } else if (room.doorIsRepairing && room.doorHp <= 0) {
+        // Door was destroyed while repairing - cancel repair
+        room.doorIsRepairing = false
+        room.doorRepairTimer = 0
       }
       
       // Door animation - smooth open/close
@@ -4996,7 +5011,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="relative flex h-screen flex-col bg-neutral-950 text-white overflow-hidden font-game-body">
+  <div class="relative flex h-screen h-[100dvh] flex-col bg-neutral-950 text-white overflow-hidden font-game-body">
     <!-- Top Bar - Navbar -->
     <div class="flex items-center justify-between border-b border-neutral-800/50 bg-neutral-900/70 backdrop-blur-sm px-3 py-1.5 z-20">
       <button class="text-neutral-400 hover:text-white transition text-sm px-2 py-1 shrink-0 font-game" @click="requestExit">{{ t('ui.back') }}</button>
@@ -5689,11 +5704,20 @@ onUnmounted(() => {
 
     <!-- Build Popup with Tabs -->
     <Transition name="popup">
-      <div v-if="showBuildPopup" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" @click.self="showBuildPopup = false">
-        <div class="game-panel relative w-full max-w-xl rounded-2xl border border-white/20 bg-neutral-900/95 backdrop-blur-md shadow-2xl max-h-[85vh] overflow-hidden flex flex-col">
+      <div 
+        v-if="showBuildPopup" 
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+        :class="{ 'pointer-events-none': !buildPopupInteractive }"
+        @click.self="buildPopupInteractive && (showBuildPopup = false, buildPopupInteractive = false)"
+        @touchend.self="buildPopupInteractive && (showBuildPopup = false, buildPopupInteractive = false)"
+      >
+        <div 
+          class="game-panel relative w-full max-w-xl rounded-2xl border border-white/20 bg-neutral-900/95 backdrop-blur-md shadow-2xl max-h-[85vh] overflow-hidden flex flex-col"
+          :class="{ 'pointer-events-none': !buildPopupInteractive }"
+        >
           <!-- Header -->
           <div class="p-4 border-b border-white/10">
-            <button class="absolute right-3 top-3 text-xl text-neutral-500 hover:text-white z-10" @click="showBuildPopup = false">✕</button>
+            <button class="absolute right-3 top-3 text-xl text-neutral-500 hover:text-white z-10" @click="showBuildPopup = false; buildPopupInteractive = false">✕</button>
             <h2 class="text-center font-game text-lg text-amber-400">{{ t('ui.buildDefense') }}</h2>
             
             <!-- Resources Display -->

@@ -296,6 +296,6 @@ export const DEFAULT_PHANTOM_KNIGHT_CONFIG: PhantomKnightConfig = {
   levelTimeIncrement: 12,
   size: 1.1,
   color: '#6366f1', // Indigo/purple color for phantom
-  passiveRangedRange: 200, // Range when passive activates
+  passiveRangedRange: 300, // Range when passive activates
   passiveThreshold: 0.6 // Below 50% HP
 }

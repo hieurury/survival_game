@@ -144,7 +144,7 @@ export const updateDoorRepair = (door: DoorRuntime, config: DoorConfig, deltaTim
 // DEFAULT DOOR CONFIG
 // =============================================================================
 export const DEFAULT_DOOR_CONFIG: DoorConfig = {
-  baseHp: 450,
+  baseHp: 500,
   hpScale: 2.0, // +100% HP per level
   maxLevel: 10,
   baseUpgradeCost: 40,
