@@ -1374,19 +1374,6 @@ const navigateToPlayer = (player: Player) => {
   camera.y = Math.max(-pad, Math.min(GAME_CONSTANTS.WORLD_HEIGHT - viewportHeight.value + pad, targetY))
 }
 
-// Navigate camera to player's hero
-const navigateToPlayer = () => {
-  cameraManualMode.value = true
-  if (!playerHero.value) return
-  const targetX = playerHero.value.position.x - viewportWidth.value / 2
-  const targetY = playerHero.value.position.y - viewportHeight.value / 2
-  const pad = GAME_CONSTANTS.CAMERA_PADDING
-  const wWidth = mapConfig.value.gridCols * mapConfig.value.cellSize
-  const wHeight = mapConfig.value.gridRows * mapConfig.value.cellSize
-  camera.x = Math.max(-pad, Math.min(wWidth - viewportWidth.value + pad, targetX))
-  camera.y = Math.max(-pad, Math.min(wHeight - viewportHeight.value + pad, targetY))
-}
-
 // Focus camera on a specific monster (for navbar monster cards)
 const focusOnMonster = (monster: Monster) => {
   cameraManualMode.value = true
