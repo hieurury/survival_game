@@ -4,12 +4,7 @@
  */
 import type { DefenseBuilding, Room, Player } from '../../types/game'
 import { GAME_CONSTANTS } from '../../types/game'
-import { getBuildingConfig, type BuildingType as EntityBuildingType } from '../config/entityConfigs'
-
-// =============================================================================
-// BUILDING TYPES - Match game.ts exactly
-// =============================================================================
-export type BuildingType = 'turret' | 'atm' | 'soul_collector' | 'vanguard'
+import { getBuildingConfig, type BuildingType } from '../config/entityConfigs'
 
 // =============================================================================
 // BUILDING CREATION

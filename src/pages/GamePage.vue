@@ -867,7 +867,6 @@ const stopMove = () => {
 }
 
 // Joystick state for mobile controls
-const joystickRef = ref<HTMLDivElement | null>(null)
 const joystickActive = ref(false)
 const joystickPosition = reactive({ x: 0, y: 0 }) // -1 to 1 normalized position
 const joystickStartTouch = reactive({ x: 0, y: 0 })
@@ -1376,7 +1375,7 @@ const navigateToPlayer = (player: Player) => {
 }
 
 // Navigate camera to monster's current position
-const navigateToMonster = () => {
+const _navigateToMonster = () => {
   cameraManualMode.value = true
   const m = getFirstMonster()
   if (!m) return
@@ -5151,7 +5150,6 @@ onUnmounted(() => {
       >
         <!-- Joystick Container -->
         <div 
-          ref="joystickRef"
           class="relative w-[100px] h-[100px] rounded-full bg-black/50 backdrop-blur-sm border-2 border-white/20 touch-manipulation select-none"
           @mousedown="handleJoystickStart"
           @mousemove="handleJoystickMove"

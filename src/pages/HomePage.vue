@@ -9,7 +9,7 @@ const emit = defineEmits<{
   (e: 'start-game'): void
 }>()
 
-const { selectedDifficulty, setDifficulty, availableDifficulties } = useGameState()
+const { selectedDifficulty: _selectedDifficulty, setDifficulty, availableDifficulties } = useGameState()
 
 const showSettings = ref(false)
 const showAssetGuide = ref(false)
