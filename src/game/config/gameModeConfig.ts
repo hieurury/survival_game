@@ -38,20 +38,20 @@ export const PURCHASE_COSTS = {
 // SOUL PURCHASE COSTS - Giá MUA bằng LINH HỒN
 // =============================================================================
 export const SOUL_PURCHASE_COSTS = {
-  atm: 100, // ATM mua bằng 100 linh hồn
+  atm: 200, // ATM mua bằng 200 linh hồn
 } as const
 
 // =============================================================================
 // SOUL COSTS - Giá linh hồn khi nâng cấp từ LEVEL 5+
 // =============================================================================
 export const SOUL_COSTS_LV5 = {
-  bed: 50,
-  door: 50,
-  turret: 10,
-  smg: 20,
-  atm: 100,
-  soul_collector: 200,
-  vanguard: 50,
+  bed: 25,          // Giường: 25 linh hồn
+  door: 20,         // Cửa: 20 linh hồn
+  turret: 10,       // Súng: 10 linh hồn
+  smg: 40,          // Tiểu liên: 40 linh hồn
+  atm: 250,         // ATM: 250 linh hồn nâng cấp lần đầu từ lv5, gấp đôi mỗi lần
+  soul_collector: 200, // Máy thu hồn: 200 linh hồn
+  vanguard: 45,     // Tiên phong: 45 linh hồn
 } as const
 
 // =============================================================================

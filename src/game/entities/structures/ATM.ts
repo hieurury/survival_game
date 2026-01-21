@@ -36,10 +36,10 @@ export interface ATMState extends StructureState {
 export const DEFAULT_ATM_CONFIG: ATMConfig = {
   type: 'atm',
   hp: 50,
-  baseCost: 100,           // 100 souls để mua
+  baseCost: 200,           // 200 souls để mua
   costCurrency: 'souls',   // Chỉ dùng linh hồn
-  upgradeCost: 100,        // 100 souls nâng cấp lần đầu
-  upgradeCostScale: 2.0,   // Gấp đôi mỗi level: 100 -> 200 -> 400 -> 800...
+  upgradeCost: 250,        // 250 souls nâng cấp lần đầu
+  upgradeCostScale: 2.0,   // Gấp đôi mỗi level: 250 -> 500 -> 1000...
   maxLevel: 6,
   baseGoldRate: 4,
   goldRatePerLevel: [4, 8, 16, 32, 64, 128],

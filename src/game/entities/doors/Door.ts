@@ -150,7 +150,7 @@ export const DEFAULT_DOOR_CONFIG: DoorConfig = {
   baseUpgradeCost: 40,
   upgradeCostScale: 2.0, // Cost doubles each level
   soulRequiredLevel: 5,
-  soulCost: 50, // Soul cost starting at level 5
+  soulCost: 20, // 20 linh hồn từ level 5
   repairDuration: 5, // 5 seconds to repair
   repairCooldown: 30, // 30 seconds between repairs
   repairPercent: 0.45, // Heals 45% of max HP

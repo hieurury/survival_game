@@ -81,6 +81,10 @@ const showUpgradeModal = ref(false)
 const upgradeTarget = ref<{ type: 'door' | 'bed' | 'building'; building?: DefenseBuilding; room?: Room } | null>(null)
 const modalInteractive = ref(false) // Prevents accidental touches when modal opens
 
+// Touch cooldown to prevent double-click on mobile
+const lastTouchTime = ref(0)
+const TOUCH_COOLDOWN = 250 // Minimum 250ms between touch interactions
+
 // Camera/viewport with drag support
 const camera = reactive({ x: 0, y: 0 })
 const cameraShake = reactive({ x: 0, y: 0, intensity: 0, duration: 0 })
@@ -623,9 +627,49 @@ const isDoorPassable = (room: Room, entityId: number, isMonster: boolean = false
   return true
 }
 
-// Create walkable grid for pathfinding (considers door states and room access)
-// isVanguard: vanguard units can pass through all doors and buildings
-const createWalkableGrid = (entityId: number, isMonster: boolean = false, isVanguard: boolean = false): GridCell[][] => {
+// =============================================================================
+// PATHFINDING CACHE - Major performance optimization
+// =============================================================================
+interface WalkableGridCache {
+  grid: GridCell[][] | null
+  hash: string
+  timestamp: number
+}
+
+const monsterGridCache = reactive<WalkableGridCache>({ grid: null, hash: '', timestamp: 0 })
+const vanguardGridCache = reactive<WalkableGridCache>({ grid: null, hash: '', timestamp: 0 })
+const GRID_CACHE_LIFETIME = 500 // Cache valid for 500ms
+
+// Generate a simple hash of door/room states for cache invalidation
+const getGridStateHash = (isMonster: boolean, isVanguard: boolean): string => {
+  // Only track door states and sleeping players (the things that affect pathfinding)
+  const doorStates = rooms.map(r => `${r.id}:${r.doorHp > 0 ? 1 : 0}:${r.ownerId}`).join('|')
+  const sleepingIds = players.filter(p => p.isSleeping).map(p => p.id).join(',')
+  return `${isMonster}:${isVanguard}:${doorStates}:${sleepingIds}`
+}
+
+// Get cached walkable grid (MAJOR OPTIMIZATION)
+const getCachedWalkableGrid = (isMonster: boolean, isVanguard: boolean): GridCell[][] => {
+  const now = Date.now()
+  const cache = isVanguard ? vanguardGridCache : monsterGridCache
+  const hash = getGridStateHash(isMonster, isVanguard)
+  
+  // Return cached grid if valid
+  if (cache.grid && cache.hash === hash && now - cache.timestamp < GRID_CACHE_LIFETIME) {
+    return cache.grid
+  }
+  
+  // Generate new grid
+  const newGrid = createWalkableGridInternal(-1, isMonster, isVanguard)
+  cache.grid = newGrid
+  cache.hash = hash
+  cache.timestamp = now
+  
+  return newGrid
+}
+
+// Internal function to create walkable grid (called by cache system)
+const createWalkableGridInternal = (entityId: number, isMonster: boolean = false, isVanguard: boolean = false): GridCell[][] => {
   const walkableGrid: GridCell[][] = []
   
   for (let y = 0; y < grid.length; y++) {
@@ -638,14 +682,10 @@ const createWalkableGrid = (entityId: number, isMonster: boolean = false, isVang
       if (cell.type === 'door' && cell.roomId !== undefined) {
         const room = rooms[cell.roomId]
         if (room) {
-          // Vanguard can pass through ANY door freely
           if (isVanguard) {
             newCell.walkable = true
-          }
-          // Monster can walk TO door cells to attack them, but can't pass through intact doors
-          // When door is broken, monster can pass through
-          else if (isMonster) {
-            newCell.walkable = true // Monster can always path TO the door cell
+          } else if (isMonster) {
+            newCell.walkable = true
           } else {
             newCell.walkable = isDoorPassable(room, entityId, false)
           }
@@ -655,15 +695,11 @@ const createWalkableGrid = (entityId: number, isMonster: boolean = false, isVang
       else if (cell.type === 'room' && cell.roomId !== undefined) {
         const room = rooms[cell.roomId]
         if (room) {
-          // Vanguard can enter ANY room freely
           if (isVanguard) {
             newCell.walkable = true
-          }
-          // Monster can only enter if door is broken
-          else if (isMonster) {
+          } else if (isMonster) {
             newCell.walkable = room.doorHp <= 0
           } else {
-            // Can only walk in room if we own it or it's accessible
             const canAccessRoom = isDoorPassable(room, entityId, false)
             newCell.walkable = canAccessRoom
           }
@@ -680,6 +716,19 @@ const createWalkableGrid = (entityId: number, isMonster: boolean = false, isVang
   }
   
   return walkableGrid
+}
+
+// Create walkable grid for pathfinding (considers door states and room access)
+// isVanguard: vanguard units can pass through all doors and buildings
+// OPTIMIZATION: Use cached grid for monsters and vanguards (most common cases)
+const createWalkableGrid = (entityId: number, isMonster: boolean = false, isVanguard: boolean = false): GridCell[][] => {
+  // Use cached grid for generic monster/vanguard pathfinding (huge performance boost)
+  if ((isMonster || isVanguard) && entityId === -1) {
+    return getCachedWalkableGrid(isMonster, isVanguard)
+  }
+  
+  // For player-specific grids, create fresh (less frequent)
+  return createWalkableGridInternal(entityId, isMonster, isVanguard)
 }
 
 // Add message
@@ -974,6 +1023,15 @@ const handleTouchMove = (e: TouchEvent) => {
 const handleTouchEnd = () => {
   // If didn't drag, simulate a click at touch position
   if (isTouchDown.value && !hasTouchDragged.value && canvasRef.value) {
+    // Check touch cooldown to prevent double-click
+    const now = Date.now()
+    if (now - lastTouchTime.value < TOUCH_COOLDOWN) {
+      isTouchDown.value = false
+      isDragging.value = false
+      return
+    }
+    lastTouchTime.value = now
+    
     // Create synthetic click event for UI interaction
     const rect = canvasRef.value.getBoundingClientRect()
     const scaleX = viewportWidth.value / rect.width
@@ -2556,17 +2614,20 @@ const updateMonsterAI = (deltaTime: number) => {
           spawnParticles(bPos, 'explosion', 15, '#ff6b6b')
           
           // Mark the build spot as destroyed (cannot rebuild)
-          // Use cellSize/2 as threshold to ensure accurate matching
-          const threshold = cellSize / 2
-          const ownerRoom = rooms.find(r => r.buildSpots.some(spot => 
-            Math.abs(spot.x - bPos.x) < threshold && Math.abs(spot.y - bPos.y) < threshold
-          ))
-          if (ownerRoom) {
-            const destroyedSpot = ownerRoom.buildSpots.find(spot =>
-              Math.abs(spot.x - bPos.x) < threshold && Math.abs(spot.y - bPos.y) < threshold
-            )
+          // Use exact grid position for matching to avoid floating point issues
+          const buildingGridX = obstacleInRange.gridX
+          const buildingGridY = obstacleInRange.gridY
+          
+          // Find room containing this building by checking all rooms' build spots
+          for (const room of rooms) {
+            const destroyedSpot = room.buildSpots.find(spot => {
+              const spotGridX = Math.floor(spot.x / cellSize)
+              const spotGridY = Math.floor(spot.y / cellSize)
+              return spotGridX === buildingGridX && spotGridY === buildingGridY
+            })
             if (destroyedSpot) {
               destroyedSpot.isDestroyed = true
+              break
             }
           }
         }
@@ -3943,108 +4004,135 @@ const render = () => {
   
   const cellSize = GAME_CONSTANTS.CELL_SIZE
   
-  // Draw grid
-  for (let y = 0; y < grid.length; y++) {
+  // Calculate visible cell range (optimization: only process visible cells)
+  const startX = Math.max(0, Math.floor(camera.x / cellSize) - 1)
+  const endX = Math.min(grid[0]?.length || 0, Math.ceil((camera.x + viewportWidth.value) / cellSize) + 1)
+  const startY = Math.max(0, Math.floor(camera.y / cellSize) - 1)
+  const endY = Math.min(grid.length, Math.ceil((camera.y + viewportHeight.value) / cellSize) + 1)
+  
+  // Batch draw cells by type (reduces state changes)
+  const corridorCells: { x: number; y: number }[] = []
+  const roomCells: { x: number; y: number }[] = []
+  const wallCells: { x: number; y: number }[] = []
+  const healZoneCells: { x: number; y: number }[] = []
+  const spawnZoneCells: { x: number; y: number }[] = []
+  
+  // Collect cells by type (only visible cells)
+  for (let y = startY; y < endY; y++) {
     const row = grid[y]
     if (!row) continue
-    for (let x = 0; x < row.length; x++) {
+    for (let x = startX; x < endX; x++) {
       const cell = row[x]
-      if (!cell) continue
-      const px = x * cellSize
-      const py = y * cellSize
+      if (!cell || cell.type === 'empty') continue
       
-      // Skip if out of view
-      if (px + cellSize < camera.x || px > camera.x + viewportWidth.value) continue
-      if (py + cellSize < camera.y || py > camera.y + viewportHeight.value) continue
-      
-      // Skip empty cells - don't render them
-      if (cell.type === 'empty') continue
-      
-      ctx.strokeStyle = '#1a1a1a'
-      ctx.lineWidth = 1
-      
+      const pos = { x, y }
       switch (cell.type) {
         case 'corridor':
-          ctx.fillStyle = '#1a1a2e'
+        case 'door':
+          corridorCells.push(pos)
           break
-        case 'room': {
-          // All rooms have the same color
-          ctx.fillStyle = '#2a2a3e'
+        case 'room':
+          roomCells.push(pos)
           break
-        }
-        case 'wall': {
-          // Walls are darker and have a border
-          ctx.fillStyle = '#151520'
+        case 'wall':
+          wallCells.push(pos)
           break
-        }
-        case 'door': {
-          // Door cells are drawn separately
-          ctx.fillStyle = '#1a1a2e'
-          break
-        }
         case 'heal_zone':
-          ctx.fillStyle = '#1a4a1a'
+          healZoneCells.push(pos)
           break
-        default:
-          ctx.fillStyle = '#0a0a0a'
-      }
-      ctx.fillRect(px, py, cellSize, cellSize)
-      
-      // Draw grid lines except for walls
-      if (cell.type !== 'wall') {
-        ctx.strokeRect(px, py, cellSize, cellSize)
       }
       
-      // Wall border effect
-      if (cell.type === 'wall') {
-        ctx.fillStyle = '#252530'
-        ctx.fillRect(px + 2, py + 2, cellSize - 4, cellSize - 4)
-      }
-      
-      // Heal zone glow (monster nests) - intensity based on mana level
-      if (cell.type === 'heal_zone') {
-        // Find the healing point for this cell
-        const healPoint = healingPoints.find(hp => 
-          x >= hp.gridX && x < hp.gridX + hp.width &&
-          y >= hp.gridY && y < hp.gridY + hp.height
-        )
-        const manaPercent = healPoint ? healPoint.manaPower / healPoint.maxManaPower : 0
-        const minManaPercent = GAME_CONSTANTS.HEALING_POINT_MIN_MANA_PERCENT
-        const hasEnoughMana = manaPercent >= minManaPercent
-        
-        // Color intensity based on mana level (red when depleted, green when full)
-        const glowIntensity = 0.15 + Math.sin(Date.now() / 400) * 0.1
-        if (hasEnoughMana) {
-          // Healthy glow - green/blue tint
-          ctx.fillStyle = `rgba(34, 197, 94, ${glowIntensity * manaPercent})`
-        } else {
-          // Depleted - red warning
-          ctx.fillStyle = `rgba(239, 68, 68, ${glowIntensity * 0.5})`
-        }
-        ctx.fillRect(px, py, cellSize, cellSize)
-        
-        // Nest icon with mana indicator - draw a crystal shape
-        ctx.fillStyle = hasEnoughMana ? 'rgba(34, 197, 94, 0.7)' : 'rgba(239, 68, 68, 0.6)'
-        const cx = px + cellSize / 2
-        const cy = py + cellSize / 2
-        ctx.beginPath()
-        ctx.moveTo(cx, cy - 12)
-        ctx.lineTo(cx + 8, cy)
-        ctx.lineTo(cx, cy + 12)
-        ctx.lineTo(cx - 8, cy)
-        ctx.closePath()
-        ctx.fill()
-        ctx.strokeStyle = hasEnoughMana ? '#22c55e' : '#ef4444'
-        ctx.lineWidth = 2
-        ctx.stroke()
-      }
-      
-      // Central spawn zone marker
       if (isInSpawnZone(x, y)) {
-        ctx.fillStyle = `rgba(96, 165, 250, ${0.1 + Math.sin(Date.now() / 500) * 0.05})`
-        ctx.fillRect(px, py, cellSize, cellSize)
+        spawnZoneCells.push(pos)
       }
     }
+  }
+  
+  // Batch draw corridors
+  ctx.fillStyle = '#1a1a2e'
+  for (const pos of corridorCells) {
+    ctx.fillRect(pos.x * cellSize, pos.y * cellSize, cellSize, cellSize)
+  }
+  
+  // Batch draw rooms
+  ctx.fillStyle = '#2a2a3e'
+  for (const pos of roomCells) {
+    ctx.fillRect(pos.x * cellSize, pos.y * cellSize, cellSize, cellSize)
+  }
+  
+  // Batch draw walls
+  ctx.fillStyle = '#151520'
+  for (const pos of wallCells) {
+    const px = pos.x * cellSize
+    const py = pos.y * cellSize
+    ctx.fillRect(px, py, cellSize, cellSize)
+  }
+  ctx.fillStyle = '#252530'
+  for (const pos of wallCells) {
+    const px = pos.x * cellSize
+    const py = pos.y * cellSize
+    ctx.fillRect(px + 2, py + 2, cellSize - 4, cellSize - 4)
+  }
+  
+  // Batch draw heal zones
+  ctx.fillStyle = '#1a4a1a'
+  for (const pos of healZoneCells) {
+    ctx.fillRect(pos.x * cellSize, pos.y * cellSize, cellSize, cellSize)
+  }
+  
+  // Draw heal zone glow (optimized - per healing point instead of per cell)
+  const glowIntensity = 0.15 + Math.sin(Date.now() / 400) * 0.1
+  const minManaPercent = GAME_CONSTANTS.HEALING_POINT_MIN_MANA_PERCENT
+  for (const hp of healingPoints) {
+    const manaPercent = hp.manaPower / hp.maxManaPower
+    const hasEnoughMana = manaPercent >= minManaPercent
+    const hpX = hp.gridX * cellSize
+    const hpY = hp.gridY * cellSize
+    const hpW = hp.width * cellSize
+    const hpH = hp.height * cellSize
+    
+    // Skip if out of view
+    if (hpX + hpW < camera.x || hpX > camera.x + viewportWidth.value) continue
+    if (hpY + hpH < camera.y || hpY > camera.y + viewportHeight.value) continue
+    
+    if (hasEnoughMana) {
+      ctx.fillStyle = `rgba(34, 197, 94, ${glowIntensity * manaPercent})`
+    } else {
+      ctx.fillStyle = `rgba(239, 68, 68, ${glowIntensity * 0.5})`
+    }
+    ctx.fillRect(hpX, hpY, hpW, hpH)
+    
+    // Nest icon
+    ctx.fillStyle = hasEnoughMana ? 'rgba(34, 197, 94, 0.7)' : 'rgba(239, 68, 68, 0.6)'
+    const cx = hpX + hpW / 2
+    const cy = hpY + hpH / 2
+    ctx.beginPath()
+    ctx.moveTo(cx, cy - 12)
+    ctx.lineTo(cx + 8, cy)
+    ctx.lineTo(cx, cy + 12)
+    ctx.lineTo(cx - 8, cy)
+    ctx.closePath()
+    ctx.fill()
+    ctx.strokeStyle = hasEnoughMana ? '#22c55e' : '#ef4444'
+    ctx.lineWidth = 2
+    ctx.stroke()
+  }
+  
+  // Batch draw spawn zone overlay
+  const spawnGlowAlpha = 0.1 + Math.sin(Date.now() / 500) * 0.05
+  ctx.fillStyle = `rgba(96, 165, 250, ${spawnGlowAlpha})`
+  for (const pos of spawnZoneCells) {
+    ctx.fillRect(pos.x * cellSize, pos.y * cellSize, cellSize, cellSize)
+  }
+  
+  // Draw grid lines (batch)
+  ctx.strokeStyle = '#1a1a1a'
+  ctx.lineWidth = 1
+  for (const pos of corridorCells) {
+    ctx.strokeRect(pos.x * cellSize, pos.y * cellSize, cellSize, cellSize)
+  }
+  for (const pos of roomCells) {
+    ctx.strokeRect(pos.x * cellSize, pos.y * cellSize, cellSize, cellSize)
   }
   
   // Draw spawn zone border

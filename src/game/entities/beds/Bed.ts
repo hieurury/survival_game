@@ -139,5 +139,5 @@ export const DEFAULT_BED_CONFIG: BedConfig = {
   upgradeCostScale: 2.0,
   interactRange: 60,
   soulRequiredLevel: 5,
-  soulCost: 200,
+  soulCost: 25, // 25 linh hồn từ level 5
 }
