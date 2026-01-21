@@ -161,66 +161,9 @@ export const createRoom = (
   }
 }
 
-// =============================================================================
-// ROOM DOOR UPGRADE - Calculate costs
-// =============================================================================
-export const calculateDoorUpgradeCost = (level: number): { gold: number; souls: number } => {
-  // Import from balance - these are fixed constants
-  const baseUpgradeCost = 40
-  const upgradeCostScale = 2
-  const soulRequiredLevel = 5
-  const soulCost = 215
-  
-  const nextLevel = level + 1
-  const gold = Math.floor(baseUpgradeCost * Math.pow(upgradeCostScale, level - 1))
-  const souls = nextLevel >= soulRequiredLevel ? soulCost * Math.pow(2, nextLevel - soulRequiredLevel) : 0
-  return { gold, souls: Math.floor(souls) }
-}
-
-export const upgradeDoor = (room: RoomRuntime, config: RoomConfig): boolean => {
-  if (room.doorLevel >= config.maxDoorLevel) return false
-  
-  room.doorLevel++
-  room.doorMaxHp = Math.floor(config.baseDoorHp * Math.pow(config.doorHpScale, room.doorLevel - 1))
-  room.doorHp = room.doorMaxHp // Full heal on upgrade
-  
-  // Calculate next level costs
-  const nextCost = calculateDoorUpgradeCost(room.doorLevel)
-  room.doorUpgradeCost = nextCost.gold
-  room.doorSoulCost = nextCost.souls
-  
-  return true
-}
-
-// =============================================================================
-// ROOM BED UPGRADE - Calculate costs
-// =============================================================================
-export const calculateBedUpgradeCost = (level: number): { gold: number; souls: number } => {
-  // Import from balance - these are fixed constants
-  const baseUpgradeCost = 25
-  const upgradeCostScale = 2
-  const soulRequiredLevel = 5
-  const soulCost = 200
-  
-  const nextLevel = level + 1
-  const gold = Math.floor(baseUpgradeCost * Math.pow(upgradeCostScale, level - 1))
-  const souls = nextLevel >= soulRequiredLevel ? soulCost * Math.pow(2, nextLevel - soulRequiredLevel) : 0
-  return { gold, souls: Math.floor(souls) }
-}
-
-export const upgradeBed = (room: RoomRuntime, config: RoomConfig): boolean => {
-  if (room.bedLevel >= config.maxBedLevel) return false
-  
-  room.bedLevel++
-  room.bedIncome = Math.floor(config.bedBaseIncome * Math.pow(config.bedIncomeScale, room.bedLevel - 1))
-  
-  // Calculate next level costs
-  const nextCost = calculateBedUpgradeCost(room.bedLevel)
-  room.bedUpgradeCost = nextCost.gold
-  room.bedSoulCost = nextCost.souls
-  
-  return true
-}
+// Door upgrade functions are now in Door.ts - single source of truth
+// Bed upgrade functions are now in Bed.ts - single source of truth
+// Import them from './Door' and './Bed' if needed
 
 // =============================================================================
 // DEFAULT ROOM CONFIG

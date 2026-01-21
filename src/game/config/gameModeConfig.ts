@@ -111,70 +111,7 @@ export const VIEWPORT_CONFIG = {
   CAMERA_BOTTOM_PADDING: 200,
 } as const
 
-// =============================================================================
-// GAME MODE PRESETS
-// =============================================================================
-export type GameModeType = 'normal' | 'hardcore' | 'endless' | 'tutorial'
-
-export interface GameModeConfig {
-  name: string
-  description: string
-  /** Hệ số nhân HP quái */
-  monsterHpMultiplier: number
-  /** Hệ số nhân damage quái */
-  monsterDamageMultiplier: number
-  /** Hệ số nhân tốc độ quái */
-  monsterSpeedMultiplier: number
-  /** Số phòng */
-  roomCount: number
-  /** Vàng khởi đầu */
-  startingGold: number
-  /** Thời gian countdown */
-  countdownTime: number
-}
-
-export const GAME_MODES: Record<GameModeType, GameModeConfig> = {
-  normal: {
-    name: 'Normal',
-    description: 'Standard gameplay',
-    monsterHpMultiplier: 1.0,
-    monsterDamageMultiplier: 1.0,
-    monsterSpeedMultiplier: 1.0,
-    roomCount: 7,
-    startingGold: 20,
-    countdownTime: 30,
-  },
-  hardcore: {
-    name: 'Hardcore',
-    description: 'Stronger monsters, less resources',
-    monsterHpMultiplier: 1.5,
-    monsterDamageMultiplier: 1.3,
-    monsterSpeedMultiplier: 1.2,
-    roomCount: 5,
-    startingGold: 10,
-    countdownTime: 20,
-  },
-  endless: {
-    name: 'Endless',
-    description: 'Survive as long as possible',
-    monsterHpMultiplier: 1.0,
-    monsterDamageMultiplier: 1.0,
-    monsterSpeedMultiplier: 1.0,
-    roomCount: 9,
-    startingGold: 30,
-    countdownTime: 45,
-  },
-  tutorial: {
-    name: 'Tutorial',
-    description: 'Learn the basics',
-    monsterHpMultiplier: 0.5,
-    monsterDamageMultiplier: 0.5,
-    monsterSpeedMultiplier: 0.8,
-    roomCount: 3,
-    startingGold: 50,
-    countdownTime: 60,
-  },
-} as const
+// GAME_MODES and GameModeConfig are now in gameModes.ts - single source of truth
 
 // =============================================================================
 // ANIMATION & MISC

@@ -133,9 +133,4 @@ export const DEFAULT_HERO_CONFIG: HeroConfig = {
   startingGold: 20,
 }
 
-export const DEFAULT_BOT_CONFIG: BotConfig = {
-  ...DEFAULT_HERO_CONFIG,
-  aggressiveness: 0.5,
-  economyFocus: 0.5,
-  defenseFocus: 0.5,
-}
+// DEFAULT_BOT_CONFIG is now in Bot.ts - single source of truth
