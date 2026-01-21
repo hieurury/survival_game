@@ -37,6 +37,15 @@ export interface RoomLayout {
 }
 
 // =============================================================================
+// BUILD SPOT WITH REBUILD CAPABILITY
+// =============================================================================
+export interface BuildSpot {
+  x: number
+  y: number
+  reBuildable: boolean  // Can rebuild a new building here after destruction? Default: false
+}
+
+// =============================================================================
 // ROOM RUNTIME STATE
 // =============================================================================
 export interface RoomRuntime {
@@ -60,6 +69,7 @@ export interface RoomRuntime {
   doorRepairCooldown: number
   doorIsRepairing: boolean
   doorRepairTimer: number
+  doorReBuildable: boolean  // Can rebuild door after destruction? Default: false
   doorPosition: Vector2
   doorGridX: number
   doorGridY: number
@@ -69,8 +79,8 @@ export interface RoomRuntime {
   bedUpgradeCost: number
   bedSoulCost: number // Soul cost for bed upgrade (0 if below soulRequiredLevel)
   bedIncome: number
-  // Build spots
-  buildSpots: Vector2[]
+  // Build spots with rebuild capability
+  buildSpots: BuildSpot[]
 }
 
 // =============================================================================
@@ -114,10 +124,11 @@ export const createRoom = (
     y: (doorGridY + 0.5) * cellSize,
   }
   
-  // Convert relative build spots to absolute world positions
-  const absoluteBuildSpots = layout.buildSpots.map(spot => ({
+  // Convert relative build spots to absolute world positions with reBuildable flag
+  const absoluteBuildSpots: BuildSpot[] = layout.buildSpots.map(spot => ({
     x: (gridX + spot.x) * cellSize + cellSize / 2,
     y: (gridY + spot.y) * cellSize + cellSize / 2,
+    reBuildable: false,  // Default: cannot rebuild after destruction
   }))
   
   const absoluteBedPosition = {
@@ -142,6 +153,7 @@ export const createRoom = (
     doorRepairCooldown: 0,
     doorIsRepairing: false,
     doorRepairTimer: 0,
+    doorReBuildable: false,  // Default: cannot rebuild door after destruction
     doorPosition,
     doorGridX,
     doorGridY,

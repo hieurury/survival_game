@@ -71,9 +71,9 @@ const openHowToPlay = () => {
       <div class="text-center">
         <div class="mb-4 text-6xl">🏚️</div>
         <h1 class="font-serif text-5xl font-bold tracking-tight text-red-600 drop-shadow-[0_0_20px_rgba(220,38,38,0.5)] md:text-6xl">
-          Silent Castle
+          Dream Knight
         </h1>
-        <p class="mt-3 text-lg text-neutral-400">Survive the night... or die trying</p>
+        <p class="mt-3 text-lg text-neutral-400">Trong giấc mơ, ai mới là kẻ săn mồi!</p>
       </div>
 
       <!-- Menu buttons -->
@@ -176,18 +176,18 @@ const openHowToPlay = () => {
 
     <!-- POPUP: Difficulty Selection -->
     <Transition name="popup">
-      <div v-if="showDifficultySelect" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" @click.self="closeAllPopups">
-        <div class="relative w-full max-w-lg rounded-2xl border border-neutral-700 bg-neutral-900 p-6 shadow-2xl">
-          <button class="absolute right-4 top-4 text-2xl text-neutral-500 hover:text-white" @click="closeAllPopups">✕</button>
+      <div v-if="showDifficultySelect" class="fixed inset-0 z-50 flex items-start sm:items-center justify-center bg-black/80 p-2 sm:p-4 overflow-y-auto" @click.self="closeAllPopups">
+        <div class="relative w-full max-w-2xl rounded-2xl border border-neutral-700 bg-neutral-900 p-4 sm:p-6 shadow-2xl my-4 sm:my-0">
+          <button class="absolute right-3 top-3 sm:right-4 sm:top-4 text-xl sm:text-2xl text-neutral-500 hover:text-white z-10" @click="closeAllPopups">✕</button>
           
-          <h2 class="mb-2 text-center font-serif text-2xl font-bold text-red-500">Chọn độ khó</h2>
-          <p class="mb-6 text-center text-sm text-neutral-400">Độ khó ảnh hưởng đến tài nguyên, số lượng quái và kích thước bản đồ</p>
+          <h2 class="mb-1 sm:mb-2 text-center font-serif text-xl sm:text-2xl font-bold text-red-500">Chọn độ khó</h2>
+          <p class="mb-4 sm:mb-6 text-center text-xs sm:text-sm text-neutral-400">Độ khó ảnh hưởng đến tài nguyên, số lượng quái và kích thước bản đồ</p>
           
-          <div class="space-y-3">
+          <div class="grid gap-3 sm:gap-4 grid-cols-1 sm:grid-cols-3">
             <button
               v-for="diff in availableDifficulties"
               :key="diff.id"
-              class="group relative w-full overflow-hidden rounded-xl border-2 p-4 text-left transition-all"
+              class="group relative flex flex-col overflow-hidden rounded-xl border-2 p-4 text-left transition-all hover:scale-[1.02]"
               :class="{
                 'border-green-600/50 bg-green-950/30 hover:border-green-500 hover:bg-green-900/40': diff.id === 'easy',
                 'border-amber-600/50 bg-amber-950/30 hover:border-amber-500 hover:bg-amber-900/40': diff.id === 'normal',
@@ -195,25 +195,60 @@ const openHowToPlay = () => {
               }"
               @click="selectDifficultyAndStart(diff.id)"
             >
-              <div class="flex items-center justify-between">
-                <div>
-                  <div class="flex items-center gap-2">
-                    <span class="text-xl">
-                      {{ diff.id === 'easy' ? '🌱' : diff.id === 'normal' ? '⚔️' : '💀' }}
-                    </span>
-                    <span class="text-lg font-bold" :class="{
-                      'text-green-400': diff.id === 'easy',
-                      'text-amber-400': diff.id === 'normal',
-                      'text-red-400': diff.id === 'hard',
-                    }">{{ diff.name }}</span>
-                  </div>
-                  <p class="mt-1 text-sm text-neutral-400">{{ diff.description }}</p>
+              <!-- Header -->
+              <div class="mb-3 flex items-center gap-2">
+                <span class="text-2xl">
+                  {{ diff.id === 'easy' ? '🌱' : diff.id === 'normal' ? '⚔️' : '💀' }}
+                </span>
+                <span class="text-lg font-bold" :class="{
+                  'text-green-400': diff.id === 'easy',
+                  'text-amber-400': diff.id === 'normal',
+                  'text-red-400': diff.id === 'hard',
+                }">{{ diff.name }}</span>
+              </div>
+
+              <!-- Stats Grid -->
+              <div class="mb-3 grid grid-cols-2 gap-2 text-xs">
+                <div class="flex items-center gap-1.5 rounded-lg bg-black/30 px-2 py-1.5">
+                  <span class="text-neutral-400">🏠</span>
+                  <span class="text-neutral-300">{{ diff.map.roomCount }} phòng</span>
                 </div>
-                <div class="text-right text-xs text-neutral-500">
-                  <div>{{ diff.player.totalCount }} người chơi</div>
-                  <div>{{ diff.monster.count }} quái vật</div>
-                  <div>{{ diff.player.startingGold }}💰 khởi đầu</div>
+                <div class="flex items-center gap-1.5 rounded-lg bg-black/30 px-2 py-1.5">
+                  <span class="text-neutral-400">🤖</span>
+                  <span class="text-neutral-300">{{ diff.player.botCount }} bot</span>
                 </div>
+                <div class="flex items-center gap-1.5 rounded-lg bg-black/30 px-2 py-1.5">
+                  <span class="text-neutral-400">👹</span>
+                  <span class="text-neutral-300">{{ diff.monster.count }} quái</span>
+                </div>
+                <div class="flex items-center gap-1.5 rounded-lg bg-black/30 px-2 py-1.5">
+                  <span class="text-neutral-400">💰</span>
+                  <span class="text-neutral-300">{{ diff.player.startingGold }} vàng</span>
+                </div>
+              </div>
+
+              <!-- Healing Points Info -->
+              <div class="rounded-lg bg-black/20 p-2 text-xs">
+                <div class="mb-1 flex items-center gap-1 text-purple-400">
+                  <span>✨</span>
+                  <span class="font-medium">Điểm hồi phục quái</span>
+                </div>
+                <div class="grid grid-cols-2 gap-1 text-neutral-400">
+                  <span>{{ diff.healingPoints.count }} điểm</span>
+                  <span>{{ diff.healingPoints.maxMana }} mana</span>
+                  <span class="col-span-2">Hồi {{ diff.healingPoints.manaRegenRate }} mana/s</span>
+                </div>
+              </div>
+
+              <!-- Recommended Badge -->
+              <div v-if="diff.id === 'easy'" class="mt-3 rounded-full bg-green-600/30 px-2 py-0.5 text-center text-xs font-medium text-green-400">
+                Khuyến nghị cho người mới
+              </div>
+              <div v-else-if="diff.id === 'normal'" class="mt-3 rounded-full bg-amber-600/30 px-2 py-0.5 text-center text-xs font-medium text-amber-400">
+                Trải nghiệm cân bằng
+              </div>
+              <div v-else class="mt-3 rounded-full bg-red-600/30 px-2 py-0.5 text-center text-xs font-medium text-red-400">
+                Dành cho người thích thử thách
               </div>
               
               <!-- Hover effect -->

@@ -134,6 +134,12 @@ export abstract class Monster implements IEntity, IDamageable, IMoveable, IComba
   public size: number
   public color: string
   
+  // Skill system
+  public skill: MonsterSkill | null = null
+  public passiveActive: boolean = false
+  public isRanged: boolean = false
+  public baseAttackRange: number = 55
+  
   constructor(
     id: number,
     config: MonsterConfigBase,
@@ -539,17 +545,32 @@ export abstract class Monster implements IEntity, IDamageable, IMoveable, IComba
 }
 
 // =============================================================================
+// MONSTER SKILL INTERFACE
+// =============================================================================
+export interface MonsterSkill {
+  name: string
+  damage: number
+  range: number
+  cooldown: number // Total cooldown in seconds
+  currentCooldown: number // Current cooldown remaining
+  isAreaDamage: boolean
+  targetStructures: boolean // Does skill target structures?
+}
+
+// =============================================================================
 // MONSTER RUNTIME TYPE (for compatibility with existing code)
 // =============================================================================
 export interface MonsterRuntime {
   id: number
   archetype: MonsterArchetype
+  name: string
   hp: number
   maxHp: number
   damage: number
   baseDamage: number
   level: number
   levelTimer: number
+  levelUpTime: number // Time needed for next level up
   targetRoomId: number | null
   targetPlayerId: number | null
   targetVanguardId: number | null
@@ -563,6 +584,7 @@ export interface MonsterRuntime {
   monsterState: MonsterState
   attackCooldown: number
   attackRange: number
+  baseAttackRange: number // For passive range switch
   animationFrame: number
   animationTimer: number
   healZone: Vector2
@@ -576,4 +598,8 @@ export interface MonsterRuntime {
   lastTargets: number[]
   size: number
   color: string
+  // Skill system
+  skill: MonsterSkill | null
+  passiveActive: boolean // For passive abilities like range switch
+  isRanged: boolean // Current attack mode (melee or ranged)
 }

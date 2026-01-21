@@ -52,6 +52,13 @@ export interface GridCell {
   walkable: boolean
 }
 
+// Build spot with destruction tracking
+export interface BuildSpot {
+  x: number
+  y: number
+  isDestroyed: boolean  // Is this spot destroyed? Cannot build if true
+}
+
 export interface Room {
   id: number
   gridX: number
@@ -68,13 +75,16 @@ export interface Room {
   doorRepairCooldown: number
   doorIsRepairing: boolean
   doorRepairTimer: number
+  doorReBuildable: boolean  // Can rebuild door after destruction? Default: false
+  doorAnimProgress: number  // Door animation progress: 0 = fully open, 1 = fully closed
+  doorAnimTarget: number    // Target animation state: 0 or 1
   ownerId: number | null
   bedPosition: Vector2
   bedLevel: number
   bedUpgradeCost: number
   bedSoulCost: number
   bedIncome: number
-  buildSpots: Vector2[]
+  buildSpots: BuildSpot[]  // Build spots with rebuild capability
   doorPosition: Vector2
   doorGridX: number
   doorGridY: number
@@ -153,14 +163,26 @@ export interface HealingPoint {
   manaRegenRate: number
 }
 
+export interface MonsterSkill {
+  name: string
+  damage: number
+  range: number
+  cooldown: number
+  currentCooldown: number
+  isAreaDamage: boolean
+  targetStructures: boolean
+}
+
 export interface Monster {
   id: number
+  name: string
   hp: number
   maxHp: number
   damage: number
   baseDamage: number
   level: number
   levelTimer: number
+  levelUpTime: number // Time needed for next level up
   targetRoomId: number | null
   targetPlayerId: number | null
   targetVanguardId: number | null
@@ -174,6 +196,7 @@ export interface Monster {
   monsterState: MonsterState
   attackCooldown: number
   attackRange: number
+  baseAttackRange: number
   animationFrame: number
   animationTimer: number
   healZone: Vector2
@@ -185,6 +208,10 @@ export interface Monster {
   facingRight: boolean
   targetTimer: number
   lastTargets: number[]
+  // Skill system
+  skill: MonsterSkill | null
+  passiveActive: boolean
+  isRanged: boolean
 }
 
 export type VanguardState = 'idle' | 'roaming' | 'chasing' | 'attacking' | 'dead'

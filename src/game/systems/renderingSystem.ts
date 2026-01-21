@@ -351,38 +351,322 @@ export function drawMonster(
   if (monster.hp <= 0) return
   
   const { x, y } = monster.position
-  const size = 20
   
-  // Monster body
-  ctx.fillStyle = monster.isRetreating ? '#f97316' : '#ef4444'
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'
   ctx.beginPath()
-  ctx.arc(x, y, size, 0, Math.PI * 2)
+  ctx.ellipse(x, y + 30, 32, 16, 0, 0, Math.PI * 2)
   ctx.fill()
+  
+  const bounce = monster.state === 'walking' ? Math.sin(monster.animationFrame * Math.PI / 2) * 5 : 0
+  
+  ctx.save()
+  ctx.translate(x, y + bounce)
+  if (!monster.facingRight) ctx.scale(-1, 1)
+  
+  // Determine body color based on monster state
+  let bodyColor = '#7c3aed' // Default purple (Ác ma)
+  if (monster.name === 'Vong hồn kỵ sỹ') {
+    bodyColor = '#6366f1' // Indigo for Phantom Knight
+  }
+  if (monster.isRetreating) {
+    bodyColor = '#581c87' // Dark purple when retreating
+  } else if (monster.passiveActive) {
+    bodyColor = '#dc2626' // Red when passive active (ranged mode)
+  }
+  
+  // Body
+  ctx.fillStyle = bodyColor
+  ctx.beginPath()
+  ctx.ellipse(0, 0, 35, 45, 0, 0, Math.PI * 2)
+  ctx.fill()
+  
+  // Horns (different style for Phantom Knight)
+  if (monster.name === 'Vong hồn kỵ sỹ') {
+    // Knight helmet style
+    ctx.fillStyle = '#44403c'
+    ctx.beginPath()
+    ctx.moveTo(-20, -35)
+    ctx.lineTo(0, -60)
+    ctx.lineTo(20, -35)
+    ctx.closePath()
+    ctx.fill()
+  } else {
+    // Demon horns
+    ctx.fillStyle = '#44403c'
+    ctx.beginPath()
+    ctx.moveTo(-18, -32)
+    ctx.lineTo(-12, -55)
+    ctx.lineTo(-6, -32)
+    ctx.fill()
+    ctx.beginPath()
+    ctx.moveTo(6, -32)
+    ctx.lineTo(12, -55)
+    ctx.lineTo(18, -32)
+    ctx.fill()
+  }
   
   // Eyes
-  ctx.fillStyle = '#ffffff'
+  ctx.fillStyle = monster.passiveActive ? '#fbbf24' : '#ef4444' // Yellow when passive active
+  ctx.shadowColor = monster.passiveActive ? '#fbbf24' : '#ef4444'
+  ctx.shadowBlur = 15
   ctx.beginPath()
-  ctx.arc(x - 6, y - 4, 4, 0, Math.PI * 2)
-  ctx.arc(x + 6, y - 4, 4, 0, Math.PI * 2)
+  ctx.arc(-12, -12, 7, 0, Math.PI * 2)
+  ctx.arc(12, -12, 7, 0, Math.PI * 2)
   ctx.fill()
+  ctx.shadowBlur = 0
   
-  // Pupils
-  ctx.fillStyle = '#000000'
-  ctx.beginPath()
-  ctx.arc(x - 5, y - 4, 2, 0, Math.PI * 2)
-  ctx.arc(x + 7, y - 4, 2, 0, Math.PI * 2)
-  ctx.fill()
-  
-  // Health bar
-  drawHealthBar(ctx, x - 20, y - 30, 40, monster.hp / monster.maxHp)
-  
-  // Level indicator
-  if (monster.level > 1) {
-    ctx.fillStyle = '#fbbf24'
-    ctx.font = 'bold 10px Arial'
-    ctx.textAlign = 'center'
-    ctx.fillText(`Lv${monster.level}`, x, y + 35)
+  // Healing effect
+  if (monster.state === 'healing') {
+    ctx.strokeStyle = '#22c55e'
+    ctx.lineWidth = 4
+    ctx.beginPath()
+    ctx.arc(0, 0, 50 + Math.sin(Date.now() / 150) * 8, 0, Math.PI * 2)
+    ctx.stroke()
   }
+  
+  // Attack effect - different for each monster type
+  if (monster.state === 'attacking') {
+    const attackAnim = (Date.now() % 400) / 400 // 0-1 animation cycle
+    
+    if (monster.name === 'Vong hồn kỵ sỹ') {
+      // Check if in ranged mode (passive active)
+      if (monster.isRanged && monster.passiveActive) {
+        // Bow and arrow animation for ranged attacks
+        ctx.save()
+        const drawAnim = Math.sin(attackAnim * Math.PI) // 0 -> 1 -> 0
+        
+        // Bow body (curved)
+        ctx.strokeStyle = '#78350f' // Brown wood
+        ctx.lineWidth = 4
+        ctx.beginPath()
+        ctx.arc(30, 0, 20, -Math.PI / 2.5, Math.PI / 2.5)
+        ctx.stroke()
+        
+        // Bow string
+        ctx.strokeStyle = '#fbbf24'
+        ctx.lineWidth = 2
+        ctx.beginPath()
+        const stringPull = drawAnim * 15 // String pulls back
+        ctx.moveTo(30, -16)
+        ctx.quadraticCurveTo(30 - stringPull, 0, 30, 16)
+        ctx.stroke()
+        
+        // Arrow
+        if (drawAnim > 0.2) {
+          const arrowX = 30 - stringPull + 5
+          
+          // Arrow shaft
+          ctx.fillStyle = '#78350f'
+          ctx.fillRect(arrowX - 25, -1.5, 30, 3)
+          
+          // Arrow head
+          ctx.fillStyle = '#94a3b8'
+          ctx.beginPath()
+          ctx.moveTo(arrowX + 8, 0)
+          ctx.lineTo(arrowX + 2, -4)
+          ctx.lineTo(arrowX + 2, 4)
+          ctx.closePath()
+          ctx.fill()
+          
+          // Arrow feathers
+          ctx.fillStyle = '#ef4444'
+          ctx.beginPath()
+          ctx.moveTo(arrowX - 25, 0)
+          ctx.lineTo(arrowX - 30, -5)
+          ctx.lineTo(arrowX - 22, 0)
+          ctx.lineTo(arrowX - 30, 5)
+          ctx.closePath()
+          ctx.fill()
+        }
+        
+        // Release effect
+        if (attackAnim > 0.7) {
+          ctx.strokeStyle = 'rgba(251, 191, 36, 0.6)'
+          ctx.lineWidth = 2
+          const releaseOffset = (attackAnim - 0.7) * 100
+          ctx.beginPath()
+          ctx.moveTo(50 + releaseOffset, -3)
+          ctx.lineTo(70 + releaseOffset, 0)
+          ctx.lineTo(50 + releaseOffset, 3)
+          ctx.stroke()
+        }
+        
+        ctx.restore()
+      } else {
+        // Sword slash animation for melee
+        ctx.save()
+        const swingAngle = Math.sin(attackAnim * Math.PI * 2) * 0.8 - 0.4
+        ctx.rotate(swingAngle)
+        
+        // Sword blade
+        ctx.fillStyle = '#94a3b8' // Steel color
+        ctx.beginPath()
+        ctx.moveTo(25, -3)
+        ctx.lineTo(65, -5)
+        ctx.lineTo(70, 0)
+        ctx.lineTo(65, 5)
+        ctx.lineTo(25, 3)
+        ctx.closePath()
+        ctx.fill()
+        
+        // Sword edge glow
+        ctx.strokeStyle = '#e2e8f0'
+        ctx.lineWidth = 1
+        ctx.stroke()
+        
+        // Sword handle
+        ctx.fillStyle = '#78350f'
+        ctx.fillRect(15, -4, 12, 8)
+        
+        // Guard
+        ctx.fillStyle = '#fbbf24'
+        ctx.fillRect(24, -8, 4, 16)
+        
+        // Slash trail effect
+        if (attackAnim > 0.3 && attackAnim < 0.7) {
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)'
+          ctx.lineWidth = 3
+          ctx.beginPath()
+          ctx.arc(45, 0, 30, -Math.PI / 3, Math.PI / 3)
+          ctx.stroke()
+        }
+        
+        ctx.restore()
+      }
+    } else {
+      // Demon claw scratch animation
+      const clawExtend = Math.sin(attackAnim * Math.PI) * 25
+      
+      // Draw 3 claws scratching
+      ctx.strokeStyle = '#ef4444'
+      ctx.lineCap = 'round'
+      
+      for (let i = -1; i <= 1; i++) {
+        const offsetY = i * 12
+        ctx.lineWidth = 4 - Math.abs(i)
+        
+        ctx.beginPath()
+        ctx.moveTo(20, offsetY)
+        ctx.quadraticCurveTo(
+          35 + clawExtend * 0.5, offsetY - 5,
+          45 + clawExtend, offsetY + i * 3
+        )
+        ctx.stroke()
+        
+        // Claw tip
+        ctx.fillStyle = '#fca5a5'
+        ctx.beginPath()
+        ctx.arc(45 + clawExtend, offsetY + i * 3, 3, 0, Math.PI * 2)
+        ctx.fill()
+      }
+      
+      // Scratch marks effect
+      if (attackAnim > 0.5) {
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.4)'
+        ctx.lineWidth = 2
+        for (let i = 0; i < 3; i++) {
+          ctx.beginPath()
+          ctx.moveTo(50 + i * 5, -15)
+          ctx.lineTo(60 + i * 5, 15)
+          ctx.stroke()
+        }
+      }
+    }
+  }
+  
+  // Ranged mode indicator (bow for Phantom Knight)
+  if (monster.isRanged && monster.name === 'Vong hồn kỵ sỹ') {
+    ctx.strokeStyle = '#fbbf24'
+    ctx.lineWidth = 3
+    ctx.beginPath()
+    ctx.arc(30, 0, 15, -Math.PI / 3, Math.PI / 3)
+    ctx.stroke()
+  }
+  
+  ctx.restore()
+  
+  // HP bar
+  const hpPercent = monster.hp / monster.maxHp
+  ctx.fillStyle = '#222'
+  ctx.fillRect(x - 40, y - 65, 80, 12)
+  ctx.fillStyle = hpPercent > 0.5 ? '#a855f7' : hpPercent > 0.2 ? '#eab308' : '#ef4444'
+  ctx.fillRect(x - 40, y - 65, 80 * hpPercent, 12)
+  ctx.strokeStyle = '#444'
+  ctx.lineWidth = 1
+  ctx.strokeRect(x - 40, y - 65, 80, 12)
+  
+  // Skill Cooldown bar (yellow) - directly below HP bar
+  if (monster.skill) {
+    const skillProgress = monster.skill.cooldown > 0 
+      ? 1 - (monster.skill.currentCooldown / monster.skill.cooldown) 
+      : 1
+    
+    ctx.fillStyle = '#78350f' // Dark yellow background
+    ctx.fillRect(x - 40, y - 51, 80, 5)
+    ctx.fillStyle = skillProgress >= 1 ? '#fbbf24' : '#eab308' // Bright yellow when ready
+    ctx.fillRect(x - 40, y - 51, 80 * Math.min(1, skillProgress), 5)
+    ctx.strokeStyle = '#92400e'
+    ctx.lineWidth = 0.5
+    ctx.strokeRect(x - 40, y - 51, 80, 5)
+    
+    // Skill ready indicator
+    if (skillProgress >= 1) {
+      ctx.fillStyle = '#fbbf24'
+      ctx.font = 'bold 8px Arial'
+      ctx.textAlign = 'right'
+      ctx.fillText('⚡', x + 48, y - 46)
+    }
+  }
+  
+  // Monster level badge
+  ctx.fillStyle = monster.name === 'Vong hồn kỵ sỹ' ? '#6366f1' : '#7c3aed'
+  ctx.beginPath()
+  ctx.arc(x + 50, y - 60, 14, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.fillStyle = '#fff'
+  ctx.font = 'bold 12px Arial'
+  ctx.textAlign = 'center'
+  ctx.fillText(`${monster.level}`, x + 50, y - 56)
+  
+  // HP text
+  ctx.fillStyle = '#fff'
+  ctx.font = '10px Arial'
+  ctx.textAlign = 'center'
+  ctx.fillText(`${Math.floor(monster.hp)}/${monster.maxHp}`, x, y - 75)
+  
+  // Monster name
+  ctx.fillStyle = '#fff'
+  ctx.font = 'bold 10px Arial'
+  ctx.textAlign = 'center'
+  ctx.fillText(monster.name, x, y - 85)
+}
+
+// =============================================================================
+// PROGRESS BAR UTILITY (for level and skill cooldown)
+// =============================================================================
+export function drawProgressBar(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  ratio: number,
+  fillColor: string = '#3b82f6',
+  bgColor: string = '#1e3a8a',
+  height: number = 4
+): void {
+  // Background
+  ctx.fillStyle = bgColor
+  ctx.fillRect(x, y, width, height)
+  
+  // Progress
+  ctx.fillStyle = fillColor
+  ctx.fillRect(x, y, width * Math.max(0, Math.min(1, ratio)), height)
+  
+  // Border
+  ctx.strokeStyle = '#1f2937'
+  ctx.lineWidth = 0.5
+  ctx.strokeRect(x, y, width, height)
 }
 
 // =============================================================================

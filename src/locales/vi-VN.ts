@@ -159,6 +159,12 @@ export const vi_VN = {
     youWereKilled: 'Bạn đã bị giết!',
     playAgain: '🔄 Chơi lại',
     home: '🏠 Trang chủ',
+    
+    // Pause modal
+    paused: 'TẠM DỪNG',
+    exitConfirm: 'Bạn có chắc muốn thoát game?',
+    resume: 'TIẾP TỤC',
+    exitGame: 'THOÁT GAME',
   },
 
   // ============================================

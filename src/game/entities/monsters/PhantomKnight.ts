@@ -1,11 +1,12 @@
 /**
- * Standard Monster Class - "Ác ma" (Demon)
- * Basic enemy with balanced stats and area damage skill
+ * Phantom Knight Class - "Vong hồn kỵ sỹ"
+ * Versatile enemy with both melee and ranged attacks
  * 
  * Characteristics:
- * - Balanced HP, damage, and speed
- * - Skill: "Gầm thét âm vong" (Wailing Roar) - AoE damage to structures
- * - Standard AI behavior
+ * - HP: 750, Speed: 130, Base Damage: 20
+ * - HP Scale: 1.2, Damage Scale: 1.4, Attack Speed: 0.9s
+ * - Skill: "Ám xạ cung" (Shadow Arrow) - Instantly destroys a structure in a random room
+ * - Passive: "Nội tại võ thuật bóng ma" - Switches to ranged (200 range) when below 50% HP
  */
 
 import type { Vector2 } from '../../../types/game'
@@ -13,42 +14,57 @@ import { Monster } from './MonsterBase'
 import type { MonsterConfigBase, MonsterRuntime, MonsterSkill } from './MonsterBase'
 
 // =============================================================================
-// ÁC MA (DEMON) SKILL CONFIG
+// PHANTOM KNIGHT SKILL CONFIG
 // =============================================================================
-export const DEMON_SKILL: MonsterSkill = {
-  name: 'Gầm thét âm vong',
-  damage: 50,
-  range: 200,
-  cooldown: 25,
+export const PHANTOM_KNIGHT_SKILL: MonsterSkill = {
+  name: 'Ám xạ cung',
+  damage: 99999, // Instant kill structure
+  range: 9999, // Global range - targets any room
+  cooldown: 50,
   currentCooldown: 0,
-  isAreaDamage: true,
+  isAreaDamage: false,
   targetStructures: true
 }
 
 // =============================================================================
-// STANDARD MONSTER CONFIG
+// PHANTOM KNIGHT CONFIG
 // =============================================================================
-export interface StandardMonsterConfig extends MonsterConfigBase {
-  archetype: 'standard'
+export interface PhantomKnightConfig extends MonsterConfigBase {
+  archetype: 'ranged'
+  /** Range when passive activates (below 50% HP) */
+  passiveRangedRange: number
+  /** HP threshold to activate passive (0-1) */
+  passiveThreshold: number
 }
 
 // =============================================================================
-// STANDARD MONSTER CLASS - ÁC MA (DEMON)
+// PHANTOM KNIGHT CLASS
 // =============================================================================
-export class StandardMonster extends Monster {
+export class PhantomKnight extends Monster {
+  public passiveRangedRange: number
+  public passiveThreshold: number
+  
   constructor(
     id: number,
-    config: StandardMonsterConfig,
+    config: PhantomKnightConfig,
     spawnPosition: Vector2,
     healZones: Vector2[] = []
   ) {
     super(id, config, spawnPosition, healZones)
+    
     // Initialize skill
-    this.skill = { ...DEMON_SKILL }
+    this.skill = { ...PHANTOM_KNIGHT_SKILL }
+    
+    // Passive config
+    this.passiveRangedRange = config.passiveRangedRange
+    this.passiveThreshold = config.passiveThreshold
+    this.isRanged = false
+    this.passiveActive = false
+    this.baseAttackRange = config.attackRange
   }
   
   /**
-   * Update skill cooldown
+   * Update monster state including passive check
    */
   public override update(deltaTime: number): void {
     super.update(deltaTime)
@@ -60,17 +76,53 @@ export class StandardMonster extends Monster {
         this.skill.currentCooldown = 0
       }
     }
+    
+    // Check passive: "Nội tại võ thuật bóng ma"
+    this.checkPassive()
   }
   
   /**
-   * Ác ma has "Gầm thét âm vong" skill
+   * Check and activate passive ability
+   * When below 50% HP, switch from melee to ranged
+   */
+  private checkPassive(): void {
+    const hpPercent = this.hp / this.maxHp
+    
+    if (!this.passiveActive && hpPercent <= this.passiveThreshold) {
+      this.activatePassive()
+    } else if (this.passiveActive && hpPercent > this.passiveThreshold) {
+      // Deactivate if healed above threshold
+      this.deactivatePassive()
+    }
+  }
+  
+  /**
+   * Activate "Nội tại võ thuật bóng ma" passive
+   */
+  private activatePassive(): void {
+    this.passiveActive = true
+    this.isRanged = true
+    this.attackRange = this.passiveRangedRange
+  }
+  
+  /**
+   * Deactivate passive (if healed)
+   */
+  private deactivatePassive(): void {
+    this.passiveActive = false
+    this.isRanged = false
+    this.attackRange = this.baseAttackRange
+  }
+  
+  /**
+   * Get special ability name
    */
   public getSpecialAbility(): string | null {
-    return 'Gầm thét âm vong'
+    return 'Ám xạ cung'
   }
   
   /**
-   * Use "Gầm thét âm vong" - AoE damage to structures in 200 range
+   * Use "Ám xạ cung" - Instantly destroy a structure in a random room
    * @returns true if skill was used successfully
    */
   public useSpecialAbility(): boolean {
@@ -100,6 +152,20 @@ export class StandardMonster extends Monster {
   }
   
   /**
+   * Get passive ability name
+   */
+  public getPassiveAbility(): string {
+    return 'Nội tại võ thuật bóng ma'
+  }
+  
+  /**
+   * Check if passive is currently active
+   */
+  public isPassiveActive(): boolean {
+    return this.passiveActive
+  }
+  
+  /**
    * Serialize monster state
    */
   public toJSON(): Record<string, unknown> {
@@ -122,6 +188,7 @@ export class StandardMonster extends Monster {
       monsterState: this.monsterState,
       attackCooldown: this.attackCooldown,
       attackRange: this.attackRange,
+      baseAttackRange: this.baseAttackRange,
       animationFrame: this.animationFrame,
       facingRight: this.facingRight,
       targetPlayerId: this.targetPlayerId,
@@ -131,25 +198,37 @@ export class StandardMonster extends Monster {
       isFullyHealing: this.isFullyHealing,
       healingInterrupted: this.healingInterrupted,
       size: this.size,
-      color: this.color
+      color: this.color,
+      skill: this.skill,
+      passiveActive: this.passiveActive,
+      isRanged: this.isRanged
     }
   }
 }
 
 // =============================================================================
-// ÁC MA FACTORY
+// PHANTOM KNIGHT RUNTIME
 // =============================================================================
-export function createStandardMonster(
+export interface PhantomKnightRuntime extends MonsterRuntime {
+  archetype: 'ranged'
+  passiveRangedRange: number
+  passiveThreshold: number
+}
+
+// =============================================================================
+// PHANTOM KNIGHT FACTORY
+// =============================================================================
+export function createPhantomKnight(
   id: number,
-  config: StandardMonsterConfig,
+  config: PhantomKnightConfig,
   spawnPosition: Vector2,
   healZones: Vector2[] = []
-): MonsterRuntime {
+): PhantomKnightRuntime {
   const levelUpTime = config.baseLevelTime + config.levelTimeIncrement
   
   return {
     id,
-    archetype: 'standard',
+    archetype: 'ranged',
     name: config.name,
     hp: config.maxHp,
     maxHp: config.maxHp,
@@ -185,33 +264,38 @@ export function createStandardMonster(
     lastTargets: [],
     size: config.size,
     color: config.color,
-    // Skill: Gầm thét âm vong
-    skill: { ...DEMON_SKILL },
+    // Skill: Ám xạ cung
+    skill: { ...PHANTOM_KNIGHT_SKILL },
     passiveActive: false,
-    isRanged: false
+    isRanged: false,
+    // Phantom Knight specific
+    passiveRangedRange: config.passiveRangedRange,
+    passiveThreshold: config.passiveThreshold
   }
 }
 
 // =============================================================================
-// DEFAULT ÁC MA (DEMON) CONFIG
+// DEFAULT PHANTOM KNIGHT CONFIG
 // =============================================================================
-export const DEFAULT_STANDARD_MONSTER_CONFIG: StandardMonsterConfig = {
-  archetype: 'standard',
-  name: 'Ác ma',
-  maxHp: 1500,
-  baseDamage: 10,
-  speed: 120,
-  attackRange: 55,
-  attackCooldown: 1.0,
-  hpScale: 1.3,
+export const DEFAULT_PHANTOM_KNIGHT_CONFIG: PhantomKnightConfig = {
+  archetype: 'ranged',
+  name: 'Vong hồn kỵ sỹ',
+  maxHp: 1150,
+  baseDamage: 20,
+  speed: 130,
+  attackRange: 55, // Melee range
+  attackCooldown: 0.9, // Faster attack speed
+  hpScale: 1.2,
   damageScale: 1.4,
   healThreshold: 0.3,
   healRate: 0.3,
   retreatSpeedBonus: 1.5,
   targetTimeout: 30,
-  aggressiveness: 0.7,
-  baseLevelTime: 30,
-  levelTimeIncrement: 5,
-  size: 1.0,
-  color: '#ef4444'
+  aggressiveness: 0.8,
+  baseLevelTime: 35,
+  levelTimeIncrement: 12,
+  size: 1.1,
+  color: '#6366f1', // Indigo/purple color for phantom
+  passiveRangedRange: 200, // Range when passive activates
+  passiveThreshold: 0.6 // Below 50% HP
 }

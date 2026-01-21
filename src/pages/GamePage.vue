@@ -7,6 +7,9 @@ import { t, getBuildingTypeName } from '../composables/useLocale'
 import { useGameState } from '../composables/useGameState'
 import { ROOM_SHAPES, doesShapeOverlap, markShapeAsOccupied } from '../game/entities/rooms/RoomShapes'
 import { getBuildingConfig, type BuildingType } from '../game/config/entityConfigs'
+import { getRandomMonsterType, createMonsterFromType, getMonsterPassiveInfo, getMonsterTypeConfig } from '../game/config/monsterPool'
+import { drawMonster as renderMonster } from '../game/systems/renderingSystem'
+import GameIcons from '../components/game/GameIcons.vue'
 import type { 
   Room, Player, Monster, GamePhase, GridCell, 
   DefenseBuilding, Particle, Projectile, Vector2,
@@ -68,6 +71,7 @@ const gameOver = ref(false)
 const victory = ref(false)
 const messageLog = ref<string[]>([])
 const showBuildPopup = ref(false)
+const buildTab = ref<'defense' | 'economy'>('defense') // Tab state for build popup
 const selectedBuildSpot = ref<{ x: number; y: number; roomId: number } | null>(null)
 const goldAccumulator = reactive<{ [key: number]: number }>({}) // Tracks partial gold per player
 
@@ -78,6 +82,7 @@ const modalInteractive = ref(false) // Prevents accidental touches when modal op
 
 // Camera/viewport with drag support
 const camera = reactive({ x: 0, y: 0 })
+const cameraShake = reactive({ x: 0, y: 0, intensity: 0, duration: 0 })
 const isDragging = ref(false)
 const dragStart = reactive({ x: 0, y: 0 })
 const cameraStart = reactive({ x: 0, y: 0 })
@@ -123,10 +128,13 @@ const initGrid = () => {
     }
   }
   
-  // Mark monster nest zones (heal zones) based on difficulty
-  for (const nest of healingPointNests.value) {
-    for (let y = nest.gridY; y < nest.gridY + nest.height; y++) {
-      for (let x = nest.gridX; x < nest.gridX + nest.width; x++) {
+}
+
+// Mark heal zones on grid based on healingPoints array (must call after initHealingPoints)
+const markHealZonesOnGrid = () => {
+  for (const hp of healingPoints) {
+    for (let y = hp.gridY; y < hp.gridY + hp.height; y++) {
+      for (let x = hp.gridX; x < hp.gridX + hp.width; x++) {
         const row = grid[y]
         if (row && row[x]) {
           row[x] = { x, y, type: 'heal_zone', walkable: true }
@@ -158,9 +166,6 @@ const initRooms = () => {
   // Spawn zone (center of map)
   const sz = spawnZone.value
   
-  // Healing point nests
-  const nests = healingPointNests.value
-  
   // Mark spawn zone as occupied
   for (let y = sz.gridY - roomPadding; y < sz.gridY + sz.height + roomPadding; y++) {
     for (let x = sz.gridX - roomPadding; x < sz.gridX + sz.width + roomPadding; x++) {
@@ -168,10 +173,21 @@ const initRooms = () => {
     }
   }
   
-  // Mark monster nests as occupied
-  for (const nest of nests) {
-    for (let y = nest.gridY - roomPadding; y < nest.gridY + nest.height + roomPadding; y++) {
-      for (let x = nest.gridX - roomPadding; x < nest.gridX + nest.width + roomPadding; x++) {
+  // Mark corner zones for healing points as occupied (dynamic based on map size)
+  // Zone size is ~20% of map dimension
+  const zoneWidth = Math.max(10, Math.floor(gridCols * 0.2))
+  const zoneHeight = Math.max(10, Math.floor(gridRows * 0.2))
+  
+  const cornerZones = [
+    { minX: 0, maxX: zoneWidth, minY: 0, maxY: zoneHeight },                           // Top-left
+    { minX: gridCols - zoneWidth, maxX: gridCols, minY: 0, maxY: zoneHeight },         // Top-right  
+    { minX: 0, maxX: zoneWidth, minY: gridRows - zoneHeight, maxY: gridRows },         // Bottom-left
+    { minX: gridCols - zoneWidth, maxX: gridCols, minY: gridRows - zoneHeight, maxY: gridRows }, // Bottom-right
+  ]
+  
+  for (const zone of cornerZones) {
+    for (let y = zone.minY; y < zone.maxY; y++) {
+      for (let x = zone.minX; x < zone.maxX; x++) {
         occupiedCells.add(`${x},${y}`)
       }
     }
@@ -331,9 +347,11 @@ const initRooms = () => {
       const bedY = (gridY + bedCell.y) * cellSize + cellSize / 2
       
       // Build spots from shape definition (excluding bed position)
-      const buildSpots: Vector2[] = shape.buildSpots.map(spot => ({
+      // Each spot has reBuildable: false by default
+      const buildSpots = shape.buildSpots.map(spot => ({
         x: (gridX + spot.x) * cellSize + cellSize / 2,
-        y: (gridY + spot.y) * cellSize + cellSize / 2
+        y: (gridY + spot.y) * cellSize + cellSize / 2,
+        isDestroyed: false  // Will be set to true when building is destroyed
       }))
       
       // Door position in pixels
@@ -360,6 +378,9 @@ const initRooms = () => {
         doorRepairCooldown: 0,
         doorIsRepairing: false,
         doorRepairTimer: 0,
+        doorReBuildable: false,  // Default: cannot rebuild door after destruction
+        doorAnimProgress: 0,  // Start with door open
+        doorAnimTarget: 0,    // Target: open
         ownerId: null,
         bedPosition: { x: bedX, y: bedY },
         bedLevel: 1,
@@ -449,64 +470,47 @@ const initPlayers = () => {
   }
 }
 
-// Monster with state machine - spawns at random nest
+// Monster with state machine - spawns at random healing point
 const getRandomNestPosition = (excludeIndex?: number): Vector2 => {
-  const nests = healingPointNests.value
-  let availableNests = nests.filter((_, i) => i !== excludeIndex)
-  if (availableNests.length === 0) availableNests = nests
+  // Use randomized healingPoints array instead of config nests
+  let availablePoints = healingPoints.filter((_, i) => i !== excludeIndex)
+  if (availablePoints.length === 0) availablePoints = [...healingPoints]
   
-  const randomNestIndex = Math.floor(Math.random() * availableNests.length)
-  const nest = availableNests[randomNestIndex]!
+  const randomIndex = Math.floor(Math.random() * availablePoints.length)
+  const hp = availablePoints[randomIndex]!
   return {
-    x: (nest.gridX + nest.width / 2) * mapConfig.value.cellSize,
-    y: (nest.gridY + nest.height / 2) * mapConfig.value.cellSize
+    x: hp.position.x,
+    y: hp.position.y
   }
 }
 
 // Support for multiple monsters based on difficulty
 const monsters = reactive<Monster[]>([])
 
-// Create a single monster with config
+// Create a single monster with random type from pool
 const createMonster = (monsterId: number, spawnPos: Vector2): Monster => {
   const mConfig = monsterConfig.value
-  const cellSize = mapConfig.value.cellSize
   
-  return {
-    id: monsterId,
-    hp: mConfig.maxHp,
-    maxHp: mConfig.maxHp,
-    damage: mConfig.baseDamage,
-    baseDamage: mConfig.baseDamage,
-    level: 1,
-    levelTimer: 0,
-    targetRoomId: null,
-    targetPlayerId: null,
-    targetVanguardId: null,
-    targetHealingPointId: null,
-    position: { ...spawnPos },
-    targetPosition: null,
-    path: [],
-    speed: mConfig.speed,
-    baseSpeed: mConfig.speed,
-    state: 'idle',
-    monsterState: 'search',
-    attackCooldown: 0,
-    attackRange: mConfig.attackRange,
-    animationFrame: 0,
-    animationTimer: 0,
-    healZone: { ...spawnPos },
-    healZones: healingPointNests.value.map(nest => ({
-      x: (nest.gridX + nest.width / 2) * cellSize,
-      y: (nest.gridY + nest.height / 2) * cellSize
-    })),
-    isRetreating: false,
-    isFullyHealing: false,
-    healingInterrupted: false,
-    healIdleTimer: 0,
-    facingRight: false,
-    targetTimer: 0,
-    lastTargets: []
-  }
+  // Get random monster type from pool
+  const monsterType = getRandomMonsterType()
+  
+  // Create monster with the random type
+  const monster = createMonsterFromType(
+    monsterId,
+    monsterType,
+    spawnPos,
+    healingPoints.map(hp => ({ x: hp.position.x, y: hp.position.y })),
+    mConfig.baseLevelTime,
+    mConfig.levelTimeIncrement
+  )
+  
+  // Override some values from difficulty config
+  monster.maxHp = monsterType.maxHp // Use type's base HP
+  monster.hp = monster.maxHp
+  monster.speed = monsterType.speed
+  monster.baseSpeed = monsterType.speed
+  
+  return monster
 }
 
 // Initialize monsters based on difficulty
@@ -533,24 +537,52 @@ let floatingTextId = 0
 let vanguardIdCounter = 0
 
 // Healing Points with Mana Power system - initialized dynamically
+// Healing points spawn at random positions near the 4 corners of the map
 const healingPoints = reactive<HealingPoint[]>([])
 
 const initHealingPoints = () => {
   healingPoints.length = 0
   const hpConfig = healingPointConfig.value
   const cellSize = mapConfig.value.cellSize
+  const gridCols = mapConfig.value.gridCols
+  const gridRows = mapConfig.value.gridRows
   
-  for (const [index, nest] of healingPointNests.value.entries()) {
+  // Define corner zones for random placement (dynamic based on map size)
+  const zoneWidth = Math.max(8, Math.floor(gridCols * 0.15))
+  const zoneHeight = Math.max(8, Math.floor(gridRows * 0.15))
+  
+  const cornerZones = [
+    { name: 'top-left', minX: 2, maxX: zoneWidth, minY: 2, maxY: zoneHeight },
+    { name: 'top-right', minX: gridCols - zoneWidth, maxX: gridCols - 2, minY: 2, maxY: zoneHeight },
+    { name: 'bottom-left', minX: 2, maxX: zoneWidth, minY: gridRows - zoneHeight, maxY: gridRows - 2 },
+    { name: 'bottom-right', minX: gridCols - zoneWidth, maxX: gridCols - 2, minY: gridRows - zoneHeight, maxY: gridRows - 2 },
+  ]
+  
+  // Shuffle corners for random placement
+  const shuffledCorners = cornerZones.sort(() => Math.random() - 0.5)
+  
+  // Get the configured nests (may have fewer entries than corners)
+  const configNests = healingPointNests.value
+  const nestCount = Math.min(configNests.length, shuffledCorners.length)
+  
+  for (let i = 0; i < nestCount; i++) {
+    const corner = shuffledCorners[i]!
+    const configNest = configNests[i]!
+    
+    // Random position within the corner zone
+    const randomX = corner.minX + Math.floor(Math.random() * (corner.maxX - corner.minX - configNest.width))
+    const randomY = corner.minY + Math.floor(Math.random() * (corner.maxY - corner.minY - configNest.height))
+    
     healingPoints.push({
-      id: index,
+      id: i,
       position: {
-        x: (nest.gridX + nest.width / 2) * cellSize,
-        y: (nest.gridY + nest.height / 2) * cellSize
+        x: (randomX + configNest.width / 2) * cellSize,
+        y: (randomY + configNest.height / 2) * cellSize
       },
-      gridX: nest.gridX,
-      gridY: nest.gridY,
-      width: nest.width,
-      height: nest.height,
+      gridX: randomX,
+      gridY: randomY,
+      width: configNest.width,
+      height: configNest.height,
       manaPower: hpConfig.maxMana,
       maxManaPower: hpConfig.maxMana,
       manaRegenRate: hpConfig.manaRegenRate
@@ -559,6 +591,12 @@ const initHealingPoints = () => {
 }
 
 const humanPlayer = computed(() => players.find(p => p.isHuman)!)
+
+// Get the room owned by human player (for repair button)
+const playerOwnedRoom = computed(() => {
+  if (!humanPlayer.value || humanPlayer.value.roomId === null || humanPlayer.value.roomId === undefined) return null
+  return rooms[humanPlayer.value.roomId] || null
+})
 
 // Check if a door is passable for a specific entity
 const isDoorPassable = (room: Room, entityId: number, isMonster: boolean = false): boolean => {
@@ -661,6 +699,28 @@ const spawnParticles = (pos: Vector2, type: Particle['type'], count: number, col
       size: 4 + Math.random() * 5,
       type
     })
+  }
+}
+
+// Screen shake effect
+const triggerScreenShake = (intensity: number, duration: number) => {
+  cameraShake.intensity = intensity
+  cameraShake.duration = duration
+}
+
+// Update screen shake
+const updateScreenShake = (deltaTime: number) => {
+  if (cameraShake.duration > 0) {
+    cameraShake.duration -= deltaTime
+    cameraShake.x = (Math.random() - 0.5) * 2 * cameraShake.intensity
+    cameraShake.y = (Math.random() - 0.5) * 2 * cameraShake.intensity
+    
+    // Decay intensity over time
+    cameraShake.intensity *= 0.95
+  } else {
+    cameraShake.x = 0
+    cameraShake.y = 0
+    cameraShake.intensity = 0
   }
 }
 
@@ -798,11 +858,7 @@ const handleKeyUp = (e: KeyboardEvent) => {
   }
 }
 
-// Touch/button handlers for mobile - set input state
-const startMove = (dir: 'up' | 'down' | 'left' | 'right') => {
-  moveInput[dir] = true
-}
-
+// Touch/button handlers for mobile are now handled by the joystick
 const stopMove = () => {
   moveInput.up = false
   moveInput.down = false
@@ -810,8 +866,74 @@ const stopMove = () => {
   moveInput.right = false
 }
 
-const stopMoveDir = (dir: 'up' | 'down' | 'left' | 'right') => {
-  moveInput[dir] = false
+// Joystick state for mobile controls
+const joystickRef = ref<HTMLDivElement | null>(null)
+const joystickActive = ref(false)
+const joystickPosition = reactive({ x: 0, y: 0 }) // -1 to 1 normalized position
+const joystickStartTouch = reactive({ x: 0, y: 0 })
+const JOYSTICK_RADIUS = 45 // Radius of the outer joystick circle
+const JOYSTICK_DEAD_ZONE = 0.15 // Dead zone threshold
+
+const handleJoystickStart = (e: TouchEvent | MouseEvent) => {
+  e.preventDefault()
+  joystickActive.value = true
+  
+  if (e instanceof TouchEvent && e.touches[0]) {
+    joystickStartTouch.x = e.touches[0].clientX
+    joystickStartTouch.y = e.touches[0].clientY
+  } else if (e instanceof MouseEvent) {
+    joystickStartTouch.x = e.clientX
+    joystickStartTouch.y = e.clientY
+  }
+}
+
+const handleJoystickMove = (e: TouchEvent | MouseEvent) => {
+  if (!joystickActive.value) return
+  e.preventDefault()
+  
+  let clientX = 0, clientY = 0
+  if (e instanceof TouchEvent && e.touches[0]) {
+    clientX = e.touches[0].clientX
+    clientY = e.touches[0].clientY
+  } else if (e instanceof MouseEvent) {
+    clientX = e.clientX
+    clientY = e.clientY
+  }
+  
+  // Calculate delta from joystick center
+  const dx = clientX - joystickStartTouch.x
+  const dy = clientY - joystickStartTouch.y
+  
+  // Calculate distance and clamp to radius
+  const dist = Math.sqrt(dx * dx + dy * dy)
+  const clampedDist = Math.min(dist, JOYSTICK_RADIUS)
+  
+  // Normalize direction
+  if (dist > 0) {
+    const normalizedX = (dx / dist) * clampedDist
+    const normalizedY = (dy / dist) * clampedDist
+    
+    // Set joystick position for visual feedback (in pixels, clamped)
+    joystickPosition.x = normalizedX
+    joystickPosition.y = normalizedY
+    
+    // Convert to normalized -1 to 1 range for input
+    const inputX = normalizedX / JOYSTICK_RADIUS
+    const inputY = normalizedY / JOYSTICK_RADIUS
+    
+    // Apply dead zone and update movement input
+    moveInput.left = inputX < -JOYSTICK_DEAD_ZONE
+    moveInput.right = inputX > JOYSTICK_DEAD_ZONE
+    moveInput.up = inputY < -JOYSTICK_DEAD_ZONE
+    moveInput.down = inputY > JOYSTICK_DEAD_ZONE
+  }
+}
+
+const handleJoystickEnd = () => {
+  joystickActive.value = false
+  joystickPosition.x = 0
+  joystickPosition.y = 0
+  stopMove()
 }
 
 // Touch handlers for canvas panning - SINGLE FINGER drag
@@ -935,6 +1057,9 @@ const handleTouchTap = (x: number, y: number) => {
       // Build spot
       for (const spot of myRoom.buildSpots) {
         if (!spot) continue
+        // Skip destroyed spots (cannot rebuild)
+        if (spot.isDestroyed) continue
+        
         const distToSpot = distance({ x: worldX, y: worldY }, spot)
         if (distToSpot < 30) {
           const existingBuilding = buildings.find(b => 
@@ -1046,6 +1171,9 @@ const handleCanvasClick = (e: MouseEvent) => {
       // Check if clicking on build spot in OWN room (can build while awake or sleeping)
       for (const spot of myRoom.buildSpots) {
         if (!spot) continue
+        // Skip destroyed spots (cannot rebuild)
+        if (spot.isDestroyed) continue
+        
         const distToSpot = distance({ x: worldX, y: worldY }, spot)
         if (distToSpot < 30) {
           // Check if spot already has ALIVE building (hp > 0)
@@ -1254,6 +1382,18 @@ const navigateToMonster = () => {
   if (!m) return
   const targetX = m.position.x - viewportWidth.value / 2
   const targetY = m.position.y - viewportHeight.value / 2
+  const pad = GAME_CONSTANTS.CAMERA_PADDING
+  const wWidth = mapConfig.value.gridCols * mapConfig.value.cellSize
+  const wHeight = mapConfig.value.gridRows * mapConfig.value.cellSize
+  camera.x = Math.max(-pad, Math.min(wWidth - viewportWidth.value + pad, targetX))
+  camera.y = Math.max(-pad, Math.min(wHeight - viewportHeight.value + pad, targetY))
+}
+
+// Focus camera on a specific monster (for navbar monster cards)
+const focusOnMonster = (monster: Monster) => {
+  cameraManualMode.value = true
+  const targetX = monster.position.x - viewportWidth.value / 2
+  const targetY = monster.position.y - viewportHeight.value / 2
   const pad = GAME_CONSTANTS.CAMERA_PADDING
   const wWidth = mapConfig.value.gridCols * mapConfig.value.cellSize
   const wHeight = mapConfig.value.gridRows * mapConfig.value.cellSize
@@ -1476,47 +1616,13 @@ const upgradeDoor = () => {
   showUpgradeModal.value = false
 }
 
-// Rebuild destroyed door - reset to level 1 with base HP
-const DOOR_REBUILD_COST = 100 // Cost to rebuild a destroyed door
-const rebuildDoor = () => {
-  if (!humanPlayer.value || humanPlayer.value.roomId === null) return
-  const room = rooms.find(r => r.id === humanPlayer.value!.roomId)
-  if (!room) return
-  
-  if (room.doorHp > 0) {
-    addMessage(t('messages.doorNotDestroyed'))
-    return
-  }
-  
-  if (humanPlayer.value.gold < DOOR_REBUILD_COST) {
-    addMessage(t('messages.doorRebuildNeedGold', { cost: DOOR_REBUILD_COST }))
-    return
-  }
-  
-  humanPlayer.value.gold -= DOOR_REBUILD_COST
-  
-  // Reset door to level 1 with new balance values
-  room.doorLevel = 1
-  room.doorMaxHp = 400 // DOOR_BALANCE.BASE_HP
-  room.doorHp = room.doorMaxHp
-  room.doorUpgradeCost = 40 // DOOR_BALANCE.BASE_UPGRADE_COST
-  room.doorSoulCost = 0 // No soul cost at level 1
-  room.doorRepairCooldown = 0
-  room.doorIsRepairing = false
-  room.doorRepairTimer = 0
-  
-  playSfx('build')
-  spawnParticles(room.doorPosition, 'build', 12, '#22c55e')
-  spawnFloatingText(room.doorPosition, 'Door Rebuilt!', '#22c55e', 16)
-  addMessage(t('messages.doorRebuilt'))
-  showUpgradeModal.value = false
-}
+// Door cannot be rebuilt once destroyed - removed rebuildDoor function
 
-// Start door repair (heals 20% over 7s, 50s cooldown)
-const startDoorRepair = () => {
-  if (!humanPlayer.value || humanPlayer.value.roomId === null) return
-  const room = rooms.find(r => r.id === humanPlayer.value!.roomId)
-  if (!room) return
+// Start door repair from button (using player's owned room)
+const startDoorRepairFromButton = () => {
+  if (!humanPlayer.value || humanPlayer.value.roomId === null || humanPlayer.value.roomId === undefined) return
+  const room = rooms[humanPlayer.value.roomId]
+  if (!room || room.ownerId !== humanPlayer.value.id) return
   
   if (room.doorRepairCooldown > 0) {
     addMessage(t('messages.doorRepairCooldown', { time: Math.ceil(room.doorRepairCooldown) }))
@@ -1528,11 +1634,15 @@ const startDoorRepair = () => {
     return
   }
   
+  if (room.doorHp <= 0) {
+    addMessage('Cửa đã bị phá hủy, cần xây lại!')
+    return
+  }
+  
   room.doorIsRepairing = true
   room.doorRepairTimer = 0
   playSfx('build')
   addMessage(t('messages.doorRepairing'))
-  showUpgradeModal.value = false
 }
 
 // Upgrade building from modal - turret: +10% damage, +20% range, double cost
@@ -1767,38 +1877,179 @@ const updateMonsterAI = (deltaTime: number) => {
       monster.attackCooldown -= deltaTime
     }
     
-    // Monster leveling - config driven
+    // Update skill cooldown
+    if (monster.skill && monster.skill.currentCooldown > 0) {
+      monster.skill.currentCooldown -= deltaTime
+      if (monster.skill.currentCooldown < 0) {
+        monster.skill.currentCooldown = 0
+      }
+    }
+    
+    // Check passive ability for "Vong hồn kỵ sỹ" (Phantom Knight)
+    // When below 50% HP, switch to ranged mode (200 range)
+    const passiveInfo = getMonsterPassiveInfo(monster.name)
+    if (passiveInfo.hasPassive && passiveInfo.threshold && passiveInfo.range) {
+      const hpPercent = monster.hp / monster.maxHp
+      if (!monster.passiveActive && hpPercent <= passiveInfo.threshold) {
+        // Activate passive
+        monster.passiveActive = true
+        monster.isRanged = true
+        monster.attackRange = passiveInfo.range
+        addMessage(`⚔️ ${monster.name} kích hoạt "Nội tại võ thuật bóng ma" - chuyển sang đánh xa!`)
+        spawnFloatingText(monster.position, '🏹 Đánh xa!', '#fbbf24', 14)
+      } else if (monster.passiveActive && hpPercent > passiveInfo.threshold) {
+        // Deactivate passive if healed above threshold
+        monster.passiveActive = false
+        monster.isRanged = false
+        monster.attackRange = monster.baseAttackRange
+      }
+    }
+    
+    // Monster skill AI - different behavior based on monster type
+    // Only use skill when ATTACKING a target
+    const isAttackingTarget = monster.monsterState === 'attack' || 
+                              monster.targetPlayerId !== null || 
+                              monster.targetVanguardId !== null ||
+                              monster.state === 'attacking'
+    
+    if (monster.skill && monster.skill.currentCooldown <= 0 && !monster.isRetreating && isAttackingTarget) {
+      // "Ác ma" - Gầm thét âm vong: AoE damage to structures in range
+      if (monster.name === 'Ác ma') {
+        const nearbyStructures = buildings.filter(b => {
+          const dist = distance(monster.position, { 
+            x: b.gridX * cellSize + cellSize / 2, 
+            y: b.gridY * cellSize + cellSize / 2 
+          })
+          return dist <= monster.skill!.range && b.hp > 0
+        })
+        
+        if (nearbyStructures.length > 0) {
+          monster.skill.currentCooldown = monster.skill.cooldown
+          
+          for (const building of nearbyStructures) {
+            building.hp -= monster.skill.damage
+            spawnFloatingText(
+              { x: building.gridX * cellSize + cellSize / 2, y: building.gridY * cellSize + cellSize / 2 },
+              `-${monster.skill.damage} 💀`,
+              '#ef4444',
+              14
+            )
+            
+            if (building.hp <= 0) {
+              building.hp = 0
+              addMessage(`⚠️ ${building.type} bị phá hủy bởi ${monster.skill.name}!`)
+            }
+          }
+          
+          spawnFloatingText(monster.position, `🔊 ${monster.skill.name}!`, '#ff6b6b', 16)
+          spawnParticles(monster.position, 'explosion', 10, '#ef4444')
+          addMessage(`👹 ${monster.name} sử dụng "${monster.skill.name}" gây ${monster.skill.damage} sát thương!`)
+          
+          // Screen shake effect for roar
+          triggerScreenShake(8, 0.4)
+        }
+      }
+      // "Vong hồn kỵ sỹ" - Ám xạ cung: Instantly destroy a random structure with arrow animation
+      else if (monster.name === 'Vong hồn kỵ sỹ') {
+        // Find all structures that are alive
+        const aliveStructures = buildings.filter(b => b.hp > 0)
+        
+        if (aliveStructures.length > 0) {
+          monster.skill.currentCooldown = monster.skill.cooldown
+          
+          // Pick a random structure to destroy
+          const targetIdx = Math.floor(Math.random() * aliveStructures.length)
+          const targetStructure = aliveStructures[targetIdx]
+          
+          if (targetStructure) {
+            const targetPos = { 
+              x: targetStructure.gridX * cellSize + cellSize / 2, 
+              y: targetStructure.gridY * cellSize + cellSize / 2 
+            }
+            
+            // Create arrow projectile flying to target
+            projectiles.push({
+              id: Date.now(),
+              position: { ...monster.position },
+              target: targetPos,
+              speed: 400,
+              damage: 0, // Damage handled separately
+              ownerId: -1, // Monster projectile
+              color: '#6366f1', // Indigo arrow
+              size: 8,
+              isHoming: false,
+              // Custom properties for arrow
+              isSkillArrow: true,
+              skillTargetBuildingId: targetStructure.id
+            } as Projectile & { isSkillArrow?: boolean, skillTargetBuildingId?: number })
+            
+            // Visual effect at monster
+            spawnFloatingText(monster.position, `🏹 ${monster.skill.name}!`, '#6366f1', 16)
+            spawnParticles(monster.position, 'spark', 5, '#6366f1')
+            addMessage(`🏹 ${monster.name} sử dụng "${monster.skill.name}" nhắm vào ${targetStructure.type}!`)
+          }
+        }
+      }
+    }
+    
+    // Update level up time for UI display
+    monster.levelUpTime = mConfig.baseLevelTime + (mConfig.levelTimeIncrement * monster.level)
+    
+    // Monster leveling - stats from monsterPool.ts (type-specific)
     const levelUpTime = mConfig.baseLevelTime + (mConfig.levelTimeIncrement * monster.level)
     monster.levelTimer += deltaTime
     if (monster.levelTimer >= levelUpTime) {
       monster.levelTimer = 0
       monster.level++
-      // Scaling by config
-      monster.damage = Math.floor(monster.baseDamage * Math.pow(mConfig.damageScale, monster.level - 1))
-      monster.maxHp = Math.floor(mConfig.maxHp * Math.pow(mConfig.hpScale, monster.level - 1))
+      
+      // Get type-specific scaling from monsterPool.ts
+      const typeConfig = getMonsterTypeConfig(monster.name)
+      const hpScale = typeConfig?.hpScale ?? 1.3
+      const damageScale = typeConfig?.damageScale ?? 1.4
+      const baseMaxHp = typeConfig?.maxHp ?? monster.maxHp
+      
+      // Apply scaling using values from monster type definition
+      monster.damage = Math.floor(monster.baseDamage * Math.pow(damageScale, monster.level - 1))
+      monster.maxHp = Math.floor(baseMaxHp * Math.pow(hpScale, monster.level - 1))
       monster.hp = monster.maxHp // FULL HEAL on level up!
+      
+      // Skill cooldown reduction: -10% per 3 levels
+      if (monster.skill && monster.skill.cooldown > 0) {
+        const cooldownReductionTiers = Math.floor(monster.level / 3) // Every 3 levels
+        const cooldownMultiplier = Math.pow(0.9, cooldownReductionTiers) // 10% reduction per tier
+        const baseCooldown = typeConfig?.skill.cooldown ?? 20 // Get from type config
+        monster.skill.cooldown = Math.max(5, Math.floor(baseCooldown * cooldownMultiplier)) // Min 5s cooldown
+      }
+      
       addMessage(t('messages.monsterSpawned', { level: monster.level, damage: monster.damage, hp: monster.maxHp }))
       spawnFloatingText(monster.position, `LV ${monster.level}!`, '#ff6b6b', 20)
     }
     
     // Find nearest monster nest with sufficient mana for healing
-    // minMana is only used when STARTING to find a healing point
+    // NEW LOGIC: Prioritize mana amount first, then distance
+    // minMana is only used when STARTING to find a healing point (10%)
     const minManaToStart = hConfig.maxMana * hConfig.minManaPercent
     
-    const findNearestHealingPoint = (): HealingPoint | null => {
-      // Filter points with enough mana to START healing
+    const findBestHealingPoint = (): HealingPoint | null => {
+      // Filter points with enough mana to START healing (>= 10%)
       const availablePoints = healingPoints.filter(hp => hp.manaPower >= minManaToStart)
       if (availablePoints.length === 0) return null
-      let nearest = availablePoints[0]!
-      let nearestDist = distance(monster.position, nearest.position)
-      for (const hp of availablePoints) {
-        const d = distance(monster.position, hp.position)
-        if (d < nearestDist) {
-          nearestDist = d
-          nearest = hp
+      
+      // Sort by mana (highest first), then by distance (closest first) for tie-breaking
+      availablePoints.sort((a, b) => {
+        // Primary: Higher mana is better
+        const manaDiff = b.manaPower - a.manaPower
+        if (Math.abs(manaDiff) > minManaToStart) {
+          // Significant mana difference - prioritize mana
+          return manaDiff
         }
-      }
-      return nearest
+        // Similar mana - use distance as tie-breaker
+        const distA = distance(monster.position, a.position)
+        const distB = distance(monster.position, b.position)
+        return distA - distB
+      })
+      
+      return availablePoints[0]!
     }
     
     // Get the locked healing point by ID
@@ -1844,7 +2095,7 @@ const updateMonsterAI = (deltaTime: number) => {
       
       // If no locked point, find a new one (only if not healing interrupted)
       if (!targetHealingPoint && !monster.healingInterrupted) {
-        targetHealingPoint = findNearestHealingPoint()
+        targetHealingPoint = findBestHealingPoint()
         if (targetHealingPoint) {
           // Lock onto this healing point
           monster.targetHealingPointId = targetHealingPoint.id
@@ -2013,7 +2264,7 @@ const updateMonsterAI = (deltaTime: number) => {
               targetVanguard.hp = 0
               targetVanguard.state = 'dead'
               targetVanguard.respawnTimer = timingConfig.value.vanguardRespawnTime
-              spawnFloatingText(targetVanguard.position, '💀 Vanguard Down!', '#ef4444', 14)
+              spawnFloatingText(targetVanguard.position, '☠ Vanguard Down!', '#ef4444', 14)
               monster.targetVanguardId = null // Clear vanguard target
             }
           }
@@ -2071,8 +2322,196 @@ const updateMonsterAI = (deltaTime: number) => {
     monster.monsterState = 'attack'
     const distToTarget = distance(monster.position, targetPlayer.position)
     
-    // Check if monster can directly attack this player
-    if (distToTarget < mConfig.attackRange) {
+    // Check if player is protected by a door (in a room with door still intact)
+    const playerRoom = targetPlayer.roomId !== null ? rooms.find(r => r.id === targetPlayer.roomId) : null
+    const playerProtectedByDoor = playerRoom && playerRoom.doorHp > 0
+    
+    // ========================================================================
+    // PHANTOM KNIGHT RANGED MODE AI
+    // When passive is active (below 50% HP), maintain distance and attack from range
+    // ========================================================================
+    if (monster.passiveActive && monster.isRanged && monster.attackRange) {
+      const rangedAttackRange = monster.attackRange // 200
+      const minSafeDistance = rangedAttackRange * 0.6 // 120 - minimum distance to maintain
+      const maxAttackDistance = rangedAttackRange * 0.95 // 190 - max distance to still hit
+      
+      // Determine the primary target position (door if protected, player if not)
+      let primaryTarget: Vector2
+      let targetIsDoor = false
+      
+      if (playerProtectedByDoor && playerRoom) {
+        // Target the door first
+        primaryTarget = playerRoom.doorPosition
+        targetIsDoor = true
+      } else {
+        // Target the player directly
+        primaryTarget = targetPlayer.position
+      }
+      
+      const distToPrimaryTarget = distance(monster.position, primaryTarget)
+      
+      // Check for obstacles (buildings) in path - attack them from range too
+      const nearestObstacle = buildings.find(b => {
+        if (b.hp <= 0) return false
+        const bPos = gridToWorld({ x: b.gridX, y: b.gridY }, cellSize)
+        const distToBuilding = distance(monster.position, bPos)
+        return distToBuilding < rangedAttackRange && distToBuilding < distToPrimaryTarget
+      })
+      
+      if (nearestObstacle) {
+        const bPos = gridToWorld({ x: nearestObstacle.gridX, y: nearestObstacle.gridY }, cellSize)
+        const distToObstacle = distance(monster.position, bPos)
+        
+        // Attack obstacle from range
+        if (distToObstacle >= minSafeDistance && distToObstacle <= maxAttackDistance) {
+          monster.state = 'attacking'
+          monster.facingRight = bPos.x > monster.position.x
+          
+          if (monster.attackCooldown <= 0) {
+            nearestObstacle.hp -= monster.damage
+            monster.attackCooldown = mConfig.attackCooldown
+            playSfx('hit')
+            spawnParticles(bPos, 'spark', 8, '#ff9900')
+            spawnFloatingText(bPos, `-${monster.damage}`, '#ef4444', 14)
+            spawnFloatingText(monster.position, '🏹', '#fbbf24', 12)
+            
+            if (nearestObstacle.hp <= 0) {
+              nearestObstacle.hp = 0
+              addMessage(t('messages.monsterDestroyedBuilding', { type: getBuildingTypeName(nearestObstacle.type) }))
+              spawnFloatingText(bPos, '💥', '#ff6b6b', 18)
+              spawnParticles(bPos, 'explosion', 15, '#ff6b6b')
+            }
+          }
+        } else if (distToObstacle < minSafeDistance) {
+          // Too close to obstacle - retreat
+          const dx = monster.position.x - bPos.x
+          const dy = monster.position.y - bPos.y
+          const length = Math.sqrt(dx * dx + dy * dy)
+          if (length > 0) {
+            monster.position.x += (dx / length) * monster.speed * 1.5 * deltaTime
+            monster.position.y += (dy / length) * monster.speed * 1.5 * deltaTime
+            monster.state = 'walking'
+            monster.facingRight = bPos.x > monster.position.x
+          }
+        } else {
+          // Too far from obstacle - approach
+          const dx = bPos.x - monster.position.x
+          const dy = bPos.y - monster.position.y
+          const length = Math.sqrt(dx * dx + dy * dy)
+          if (length > 0) {
+            monster.position.x += (dx / length) * monster.speed * deltaTime
+            monster.position.y += (dy / length) * monster.speed * deltaTime
+            monster.state = 'walking'
+            monster.facingRight = bPos.x > monster.position.x
+          }
+        }
+        continue
+      }
+      
+      // No obstacles - attack primary target (door or player)
+      if (targetIsDoor && playerRoom) {
+        // Attack door from range
+        if (distToPrimaryTarget >= minSafeDistance && distToPrimaryTarget <= maxAttackDistance) {
+          monster.state = 'attacking'
+          monster.facingRight = primaryTarget.x > monster.position.x
+          
+          if (monster.attackCooldown <= 0) {
+            const doorDamage = Math.floor(monster.damage * 1.5)
+            playerRoom.doorHp -= doorDamage
+            monster.attackCooldown = mConfig.attackCooldown
+            playSfx('hit')
+            spawnParticles(primaryTarget, 'spark', 10, '#fbbf24')
+            spawnFloatingText(primaryTarget, `-${doorDamage}`, '#ef4444', 16)
+            spawnFloatingText(monster.position, '🏹', '#fbbf24', 12)
+            
+            if (playerRoom.doorHp <= 0) {
+              playerRoom.doorHp = 0
+              addMessage(t('messages.roomDoorDestroyed', { roomId: playerRoom.id }))
+              spawnFloatingText(primaryTarget, '💥 DESTROYED!', '#ff6b6b', 20)
+            }
+          }
+        } else if (distToPrimaryTarget < minSafeDistance) {
+          // Too close to door - retreat
+          const dx = monster.position.x - primaryTarget.x
+          const dy = monster.position.y - primaryTarget.y
+          const length = Math.sqrt(dx * dx + dy * dy)
+          if (length > 0) {
+            monster.position.x += (dx / length) * monster.speed * 1.5 * deltaTime
+            monster.position.y += (dy / length) * monster.speed * 1.5 * deltaTime
+            monster.state = 'walking'
+            monster.facingRight = primaryTarget.x > monster.position.x
+          }
+        } else {
+          // Too far from door - approach to attack range
+          const dx = primaryTarget.x - monster.position.x
+          const dy = primaryTarget.y - monster.position.y
+          const length = Math.sqrt(dx * dx + dy * dy)
+          if (length > 0) {
+            monster.position.x += (dx / length) * monster.speed * deltaTime
+            monster.position.y += (dy / length) * monster.speed * deltaTime
+            monster.state = 'walking'
+            monster.facingRight = primaryTarget.x > monster.position.x
+          }
+        }
+      } else {
+        // Attack player from range (door is broken or player outside)
+        if (distToPrimaryTarget >= minSafeDistance && distToPrimaryTarget <= maxAttackDistance) {
+          monster.state = 'attacking'
+          monster.facingRight = primaryTarget.x > monster.position.x
+          
+          if (monster.attackCooldown <= 0) {
+            targetPlayer.hp -= monster.damage
+            monster.attackCooldown = mConfig.attackCooldown
+            playSfx('hit')
+            spawnParticles(targetPlayer.position, 'blood', 10, '#ef4444')
+            spawnFloatingText(targetPlayer.position, `-${monster.damage}`, '#ef4444', 18)
+            spawnFloatingText(monster.position, '🏹', '#fbbf24', 12)
+            
+            if (targetPlayer.hp <= 0) {
+              targetPlayer.hp = 0
+              targetPlayer.alive = false
+              targetPlayer.state = 'dying'
+              addMessage(t('messages.playerKilled', { name: targetPlayer.name }))
+              monster.targetPlayerId = null
+              monster.targetTimer = 0
+              if (targetPlayer.isHuman) endGame(false)
+            }
+          }
+        } else if (distToPrimaryTarget < minSafeDistance) {
+          // Too close to player - retreat
+          const dx = monster.position.x - primaryTarget.x
+          const dy = monster.position.y - primaryTarget.y
+          const length = Math.sqrt(dx * dx + dy * dy)
+          if (length > 0) {
+            monster.position.x += (dx / length) * monster.speed * 1.5 * deltaTime
+            monster.position.y += (dy / length) * monster.speed * 1.5 * deltaTime
+            monster.state = 'walking'
+            monster.facingRight = primaryTarget.x > monster.position.x
+          }
+        } else {
+          // Too far - approach to attack range
+          const dx = primaryTarget.x - monster.position.x
+          const dy = primaryTarget.y - monster.position.y
+          const length = Math.sqrt(dx * dx + dy * dy)
+          if (length > 0) {
+            monster.position.x += (dx / length) * monster.speed * deltaTime
+            monster.position.y += (dy / length) * monster.speed * deltaTime
+            monster.state = 'walking'
+            monster.facingRight = primaryTarget.x > monster.position.x
+          }
+        }
+      }
+      continue
+    }
+    
+    // ========================================================================
+    // NORMAL MELEE MONSTER AI (Ác ma or Phantom Knight before passive)
+    // ========================================================================
+    
+    // Check if monster can directly attack this player (use monster's attack range)
+    // But ONLY if player is NOT protected by a door
+    const effectiveAttackRange = monster.attackRange || mConfig.attackRange
+    if (distToTarget < effectiveAttackRange && !playerProtectedByDoor) {
       monster.state = 'attacking'
       monster.path = []
       if (monster.attackCooldown <= 0) {
@@ -2096,7 +2535,7 @@ const updateMonsterAI = (deltaTime: number) => {
     }
     
     // Check if we need to break through a door to reach the player
-    const playerRoom = targetPlayer.roomId !== null ? rooms.find(r => r.id === targetPlayer.roomId) : null
+    // (playerRoom and playerProtectedByDoor already defined above)
     
     // OBSTACLE DESTRUCTION: Check if any building blocks the path to target
     const obstacleInRange = buildings.find(b => {
@@ -2124,6 +2563,19 @@ const updateMonsterAI = (deltaTime: number) => {
           addMessage(t('messages.monsterDestroyedBuilding', { type: getBuildingTypeName(obstacleInRange.type) }))
           spawnFloatingText(bPos, '💥', '#ff6b6b', 18)
           spawnParticles(bPos, 'explosion', 15, '#ff6b6b')
+          
+          // Mark the build spot as destroyed (cannot rebuild)
+          const ownerRoom = rooms.find(r => r.buildSpots.some(spot => 
+            Math.abs(spot.x - bPos.x) < 30 && Math.abs(spot.y - bPos.y) < 30
+          ))
+          if (ownerRoom) {
+            const destroyedSpot = ownerRoom.buildSpots.find(spot =>
+              Math.abs(spot.x - bPos.x) < 30 && Math.abs(spot.y - bPos.y) < 30
+            )
+            if (destroyedSpot) {
+              destroyedSpot.isDestroyed = true
+            }
+          }
         }
       }
       continue
@@ -2214,6 +2666,8 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     const cellSize = mapConfig.value.cellSize
     const findEmptySpot = (prioritizeNearDoor: boolean = false): Vector2 | null => {
       const emptySpots = myRoom.buildSpots.filter(spot => {
+        // Skip destroyed spots (marked with red X)
+        if (spot.isDestroyed) return false
         return !buildings.some(b => {
           if (b.hp <= 0) return false // Destroyed buildings don't block
           const bPos = gridToWorld({ x: b.gridX, y: b.gridY }, cellSize)
@@ -2238,6 +2692,8 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
     // Find best spot specifically for turret - near door for maximum effectiveness
     const findBestTurretSpot = (): Vector2 | null => {
       const emptySpots = myRoom.buildSpots.filter(spot => {
+        // Skip destroyed spots (marked with red X)
+        if (spot.isDestroyed) return false
         return !buildings.some(b => {
           if (b.hp <= 0) return false
           const bPos = gridToWorld({ x: b.gridX, y: b.gridY }, cellSize)
@@ -2487,7 +2943,7 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
           upgradableSMG.range = getBuildingRange(upgradableSMG.baseRange, upgradableSMG.level, 'smg')
           upgradableSMG.upgradeCost *= 2
           const pos = gridToWorld({ x: upgradableSMG.gridX, y: upgradableSMG.gridY }, GAME_CONSTANTS.CELL_SIZE)
-          spawnFloatingText(pos, `🔥 LV${upgradableSMG.level}!`, '#f97316', 12)
+          spawnFloatingText(pos, `↑ LV${upgradableSMG.level}!`, '#f97316', 12)
           return true
         }
       })
@@ -2570,7 +3026,7 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
           upgradableSoulCollector.soulRate = GAME_CONSTANTS.SOUL_COLLECTOR_LEVELS[Math.min(upgradableSoulCollector.level - 1, 5)] || upgradableSoulCollector.level
           upgradableSoulCollector.upgradeCost *= 2
           const pos = gridToWorld({ x: upgradableSoulCollector.gridX, y: upgradableSoulCollector.gridY }, GAME_CONSTANTS.CELL_SIZE)
-          spawnFloatingText(pos, `👻 LV${upgradableSoulCollector.level}!`, '#a855f7', 12)
+          spawnFloatingText(pos, `↑ LV${upgradableSoulCollector.level}!`, '#a855f7', 12)
           return true
         }
       })
@@ -2684,7 +3140,7 @@ const updatePlayerAI = (player: Player, _deltaTime: number) => {
           upgradableVanguard.upgradeCost *= 2
           spawnVanguardUnits(upgradableVanguard)
           const pos = gridToWorld({ x: upgradableVanguard.gridX, y: upgradableVanguard.gridY }, GAME_CONSTANTS.CELL_SIZE)
-          spawnFloatingText(pos, `⚔️ LV${upgradableVanguard.level}!`, '#6366f1', 14)
+          spawnFloatingText(pos, `↑ LV${upgradableVanguard.level}!`, '#6366f1', 14)
           return true
         }
       })
@@ -3093,8 +3549,35 @@ const updateBuildings = (deltaTime: number) => {
 // Update projectiles
 const updateProjectiles = (deltaTime: number) => {
   for (let i = projectiles.length - 1; i >= 0; i--) {
-    const proj = projectiles[i]
+    const proj = projectiles[i] as (Projectile & { isSkillArrow?: boolean, skillTargetBuildingId?: number })
     if (!proj) continue
+    
+    // Handle skill arrow from Phantom Knight
+    if (proj.isSkillArrow && proj.skillTargetBuildingId !== undefined) {
+      const moved = moveTowards(proj.position, proj.target, 400, deltaTime) // Arrow speed 400
+      proj.position.x = moved.x
+      proj.position.y = moved.y
+      
+      // Check if arrow reached target
+      if (distance(proj.position, proj.target) < 15) {
+        const targetBuilding = buildings.find(b => b.id === proj.skillTargetBuildingId)
+        if (targetBuilding && targetBuilding.hp > 0) {
+          // Destroy the structure
+          targetBuilding.hp = 0
+          
+          spawnFloatingText(
+            proj.target,
+            `💥 PHÁT HỦY!`,
+            '#dc2626',
+            18
+          )
+          spawnParticles(proj.target, 'explosion', 15, '#6366f1')
+        }
+        projectiles.splice(i, 1)
+        continue
+      }
+      continue
+    }
     
     // Find target monster - use targetMonsterId if set, otherwise first alive monster
     const targetMonster = proj.targetMonsterId !== undefined
@@ -3263,6 +3746,12 @@ const updateCamera = () => {
 
 // Game loop
 const gameLoop = (timestamp: number) => {
+  // Don't update game if paused
+  if (isPaused.value) {
+    animationId = requestAnimationFrame(gameLoop)
+    return
+  }
+  
   const deltaTime = Math.min((timestamp - lastTime) / 1000, 0.1)
   lastTime = timestamp
   
@@ -3314,7 +3803,7 @@ const gameLoop = (timestamp: number) => {
             goldAccumulator[player.id] = goldAccumulator[player.id]! - secondsPassed
             // Show floating gold text
             if (player.isHuman) {
-              spawnFloatingText(player.position, `+${goldToAdd}💰`, '#fbbf24', 14)
+              spawnFloatingText(player.position, `+${goldToAdd}$`, '#fbbf24', 14)
             }
           }
         }
@@ -3332,7 +3821,7 @@ const gameLoop = (timestamp: number) => {
       }
     })
     
-    // Update rooms (door repair, cooldowns)
+    // Update rooms (door repair, cooldowns, door animation)
     rooms.forEach(room => {
       // Door repair cooldown
       if (room.doorRepairCooldown > 0) {
@@ -3357,6 +3846,17 @@ const gameLoop = (timestamp: number) => {
           }
         }
       }
+      
+      // Door animation - smooth open/close
+      const hasSleepingPlayer = players.some(p => p.alive && p.roomId === room.id && p.isSleeping)
+      room.doorAnimTarget = (hasSleepingPlayer && room.doorHp > 0) ? 1 : 0
+      
+      const animSpeed = 3.0 // Animation speed (per second)
+      if (room.doorAnimProgress < room.doorAnimTarget) {
+        room.doorAnimProgress = Math.min(room.doorAnimTarget, room.doorAnimProgress + animSpeed * deltaTime)
+      } else if (room.doorAnimProgress > room.doorAnimTarget) {
+        room.doorAnimProgress = Math.max(room.doorAnimTarget, room.doorAnimProgress - animSpeed * deltaTime)
+      }
     })
     
     // Update ATM and Soul Collector income
@@ -3375,7 +3875,7 @@ const gameLoop = (timestamp: number) => {
           goldAccumulator[building.id + 1000] = goldAccumulator[building.id + 1000]! - 1
           if (owner.isHuman) {
             const bPos = gridToWorld({ x: building.gridX, y: building.gridY }, GAME_CONSTANTS.CELL_SIZE)
-            spawnFloatingText(bPos, `+${goldToAdd}💰`, '#22c55e', 12)
+            spawnFloatingText(bPos, `+${goldToAdd}$`, '#22c55e', 12)
           }
         }
       }
@@ -3390,7 +3890,7 @@ const gameLoop = (timestamp: number) => {
           goldAccumulator[building.id + 2000] = goldAccumulator[building.id + 2000]! - 1
           if (owner.isHuman) {
             const bPos = gridToWorld({ x: building.gridX, y: building.gridY }, GAME_CONSTANTS.CELL_SIZE)
-            spawnFloatingText(bPos, `+${soulsToAdd}👻`, '#a855f7', 12)
+            spawnFloatingText(bPos, `+${soulsToAdd}✧`, '#a855f7', 12)
           }
         }
       }
@@ -3417,6 +3917,7 @@ const gameLoop = (timestamp: number) => {
     
     updateParticles(deltaTime)
     updateFloatingTexts(deltaTime)
+    updateScreenShake(deltaTime)
     updateCamera()
   }
   
@@ -3437,7 +3938,8 @@ const render = () => {
   ctx.fillRect(0, 0, canvas.width, canvas.height)
   
   ctx.save()
-  ctx.translate(-camera.x, -camera.y)
+  // Apply camera position + screen shake
+  ctx.translate(-camera.x + cameraShake.x, -camera.y + cameraShake.y)
   
   const cellSize = GAME_CONSTANTS.CELL_SIZE
   
@@ -3521,12 +4023,20 @@ const render = () => {
         }
         ctx.fillRect(px, py, cellSize, cellSize)
         
-        // Nest icon with mana indicator
-        ctx.fillStyle = hasEnoughMana ? 'rgba(34, 197, 94, 0.6)' : 'rgba(239, 68, 68, 0.5)'
-        ctx.font = '16px Arial'
-        ctx.textAlign = 'center'
-        ctx.textBaseline = 'middle'
-        ctx.fillText(hasEnoughMana ? '🐉' : '💀', px + cellSize / 2, py + cellSize / 2)
+        // Nest icon with mana indicator - draw a crystal shape
+        ctx.fillStyle = hasEnoughMana ? 'rgba(34, 197, 94, 0.7)' : 'rgba(239, 68, 68, 0.6)'
+        const cx = px + cellSize / 2
+        const cy = py + cellSize / 2
+        ctx.beginPath()
+        ctx.moveTo(cx, cy - 12)
+        ctx.lineTo(cx + 8, cy)
+        ctx.lineTo(cx, cy + 12)
+        ctx.lineTo(cx - 8, cy)
+        ctx.closePath()
+        ctx.fill()
+        ctx.strokeStyle = hasEnoughMana ? '#22c55e' : '#ef4444'
+        ctx.lineWidth = 2
+        ctx.stroke()
       }
       
       // Central spawn zone marker
@@ -3554,7 +4064,7 @@ const render = () => {
   ctx.font = 'bold 14px Arial'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  ctx.fillText('⭐ SPAWN ZONE ⭐', szPx + szWidth / 2, szPy + szHeight / 2)
+  ctx.fillText('★ SPAWN ZONE ★', szPx + szWidth / 2, szPy + szHeight / 2)
   
   // Draw healing point mana bars
   healingPoints.forEach(hp => {
@@ -3587,13 +4097,13 @@ const render = () => {
     ctx.font = 'bold 10px Arial'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    const manaText = `💧 ${Math.floor(hp.manaPower)}/${hp.maxManaPower}`
+    const manaText = `${Math.floor(hp.manaPower)}/${hp.maxManaPower}`
     ctx.fillText(manaText, barX + barWidth / 2, barY + barHeight / 2)
     
     // Healing point label
     ctx.fillStyle = hasEnoughMana ? 'rgba(34, 197, 94, 0.9)' : 'rgba(239, 68, 68, 0.9)'
     ctx.font = 'bold 12px Arial'
-    ctx.fillText(hasEnoughMana ? '🐉 NEST' : '💀 DEPLETED', centerX, hp.gridY * cellSize - 8)
+    ctx.fillText(hasEnoughMana ? '◆ NEST' : '✖ DEPLETED', centerX, hp.gridY * cellSize - 8)
   })
   
   // Draw rooms with details
@@ -3651,33 +4161,97 @@ const render = () => {
     
     // Draw door at correct position
     if (room.doorHp <= 0) {
-      // Door broken - show rubble
+      // Door broken - show rubble/debris
+      ctx.fillStyle = '#2a2a2a'
+      ctx.fillRect(doorPx + 8, doorPy + 8, cellSize - 16, cellSize - 16)
+      // Draw debris pieces
+      ctx.fillStyle = '#4a4a4a'
+      ctx.fillRect(doorPx + 12, doorPy + 20, 8, 6)
+      ctx.fillRect(doorPx + 25, doorPy + 15, 10, 5)
+      ctx.fillRect(doorPx + 18, doorPy + 28, 12, 4)
       ctx.fillStyle = '#3a3a3a'
-      ctx.fillRect(doorPx + 10, doorPy + 10, cellSize - 20, cellSize - 20)
-      ctx.fillStyle = '#555'
-      ctx.font = '16px Arial'
-      ctx.textAlign = 'center'
-      ctx.fillText('💥', doorPx + cellSize/2, doorPy + cellSize/2 + 6)
+      ctx.fillRect(doorPx + 30, doorPy + 25, 6, 8)
+      // X mark
+      ctx.strokeStyle = '#ef4444'
+      ctx.lineWidth = 3
+      ctx.beginPath()
+      ctx.moveTo(doorPx + 15, doorPy + 15)
+      ctx.lineTo(doorPx + cellSize - 15, doorPy + cellSize - 15)
+      ctx.moveTo(doorPx + cellSize - 15, doorPy + 15)
+      ctx.lineTo(doorPx + 15, doorPy + cellSize - 15)
+      ctx.stroke()
     } else if (isDoorClosed) {
-      // Door closed - solid door with lock icon
-      ctx.fillStyle = '#5a4a6a'
+      // Door closed - solid wooden door with metal reinforcement
+      // Door animation state (for smooth closing)
+      const doorProgress = room.doorAnimProgress ?? 1
+      const doorWidth = (cellSize - 20) * doorProgress
+      
+      // Door frame
+      ctx.fillStyle = '#3a2a1a'
       ctx.fillRect(doorPx + 10, doorPy + 10, cellSize - 20, cellSize - 20)
-      ctx.strokeStyle = '#8a6aaa'
+      
+      // Door panel (animated width)
+      ctx.fillStyle = '#6a4a2a'
+      ctx.fillRect(doorPx + 10, doorPy + 10, doorWidth, cellSize - 20)
+      
+      // Wood grain lines
+      if (doorProgress > 0.5) {
+        ctx.strokeStyle = '#5a3a1a'
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(doorPx + 15, doorPy + 15)
+        ctx.lineTo(doorPx + 15, doorPy + cellSize - 15)
+        ctx.moveTo(doorPx + cellSize/2, doorPy + 15)
+        ctx.lineTo(doorPx + cellSize/2, doorPy + cellSize - 15)
+        ctx.stroke()
+      }
+      
+      // Metal reinforcement bars
+      ctx.fillStyle = '#8a7a6a'
+      ctx.fillRect(doorPx + 10, doorPy + 18, Math.min(doorWidth, cellSize - 20), 4)
+      ctx.fillRect(doorPx + 10, doorPy + cellSize - 22, Math.min(doorWidth, cellSize - 20), 4)
+      
+      // Lock/handle
+      if (doorProgress > 0.8) {
+        ctx.fillStyle = '#fbbf24'
+        ctx.beginPath()
+        ctx.arc(doorPx + cellSize - 18, doorPy + cellSize/2, 5, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.fillStyle = '#b8860b'
+        ctx.beginPath()
+        ctx.arc(doorPx + cellSize - 18, doorPy + cellSize/2, 3, 0, Math.PI * 2)
+        ctx.fill()
+      }
+      
+      // Border
+      ctx.strokeStyle = '#8a6a4a'
       ctx.lineWidth = 3
       ctx.strokeRect(doorPx + 10, doorPy + 10, cellSize - 20, cellSize - 20)
-      ctx.fillStyle = '#fbbf24'
-      ctx.font = '14px Arial'
-      ctx.textAlign = 'center'
-      ctx.fillText('🔒', doorPx + cellSize/2, doorPy + cellSize/2 + 5)
     } else {
-      // Door open - frame only
-      ctx.strokeStyle = doorHpPercent > 0.5 ? '#4a6a4a' : doorHpPercent > 0.2 ? '#6a5a3a' : '#6a3a3a'
-      ctx.lineWidth = 3
+      // Door open - just frame with open archway
+      const doorProgress = room.doorAnimProgress ?? 0
+      
+      // Door frame (stone/wood arch)
+      ctx.fillStyle = '#4a3a2a'
+      ctx.fillRect(doorPx + 8, doorPy + 8, 6, cellSize - 16) // Left pillar
+      ctx.fillRect(doorPx + cellSize - 14, doorPy + 8, 6, cellSize - 16) // Right pillar
+      ctx.fillRect(doorPx + 8, doorPy + 8, cellSize - 16, 6) // Top beam
+      
+      // Inner doorway (darker)
+      ctx.fillStyle = '#1a1a1a'
+      ctx.fillRect(doorPx + 14, doorPy + 14, cellSize - 28, cellSize - 22)
+      
+      // If door is animating (partially closed)
+      if (doorProgress > 0) {
+        const partialWidth = (cellSize - 28) * doorProgress
+        ctx.fillStyle = '#6a4a2a'
+        ctx.fillRect(doorPx + 14, doorPy + 14, partialWidth, cellSize - 22)
+      }
+      
+      // Frame highlight
+      ctx.strokeStyle = doorHpPercent > 0.5 ? '#5a7a5a' : doorHpPercent > 0.2 ? '#7a6a4a' : '#7a4a4a'
+      ctx.lineWidth = 2
       ctx.strokeRect(doorPx + 10, doorPy + 10, cellSize - 20, cellSize - 20)
-      ctx.fillStyle = '#2a4a2a'
-      ctx.font = '14px Arial'
-      ctx.textAlign = 'center'
-      ctx.fillText('🚪', doorPx + cellSize/2, doorPy + cellSize/2 + 5)
     }
     
     // Door level badge (top-left of door cell)
@@ -3720,33 +4294,59 @@ const render = () => {
     ctx.lineWidth = 1
     ctx.strokeRect(doorBarX, doorBarY, doorBarWidth, doorBarHeight)
     
-    // Room icon - draw near bed position (center of interior)
-    ctx.font = '20px Arial'
-    ctx.textAlign = 'center'
-    // Use room center which is calculated from actual shape cells
-    ctx.fillText('🏠', room.centerX, room.centerY - cellSize)
+    // Bed - redesigned game-style bed
+    const bedX = room.bedPosition.x
+    const bedY = room.bedPosition.y
     
-    // Bed
-    ctx.fillStyle = '#5a4a3a'
-    ctx.fillRect(room.bedPosition.x - 25, room.bedPosition.y - 15, 50, 30)
-    ctx.fillStyle = '#8b7355'
-    ctx.fillRect(room.bedPosition.x - 20, room.bedPosition.y - 12, 40, 24)
+    // Bed frame (wooden)
+    ctx.fillStyle = '#5a3a1a'
+    ctx.fillRect(bedX - 28, bedY - 18, 56, 36)
+    
+    // Bed mattress
+    ctx.fillStyle = '#8b6b4b'
+    ctx.fillRect(bedX - 24, bedY - 14, 48, 28)
+    
+    // Pillow
+    ctx.fillStyle = '#e8dcc8'
+    ctx.fillRect(bedX - 22, bedY - 12, 16, 10)
+    
+    // Blanket (color based on level)
+    const blanketColors = ['#4a6a8a', '#5a7a5a', '#7a5a7a', '#8a6a4a', '#6a4a4a', '#3a3a6a']
+    ctx.fillStyle = blanketColors[Math.min(room.bedLevel - 1, blanketColors.length - 1)] || '#4a6a8a'
+    ctx.fillRect(bedX - 4, bedY - 12, 26, 24)
+    
+    // Blanket pattern (stripes for higher levels)
+    if (room.bedLevel >= 3) {
+      ctx.fillStyle = 'rgba(255,255,255,0.15)'
+      ctx.fillRect(bedX + 2, bedY - 12, 4, 24)
+      ctx.fillRect(bedX + 12, bedY - 12, 4, 24)
+    }
+    
+    // Bed legs
+    ctx.fillStyle = '#3a2a1a'
+    ctx.fillRect(bedX - 26, bedY + 14, 6, 6)
+    ctx.fillRect(bedX + 20, bedY + 14, 6, 6)
+    
+    // Level badge
+    ctx.fillStyle = '#1e40af'
+    ctx.beginPath()
+    ctx.arc(bedX + 24, bedY - 14, 10, 0, Math.PI * 2)
+    ctx.fill()
     ctx.fillStyle = '#fff'
-    ctx.font = '14px Arial'
+    ctx.font = 'bold 10px Arial'
     ctx.textAlign = 'center'
-    ctx.fillText(`Lv${room.bedLevel}`, room.bedPosition.x, room.bedPosition.y + 35)
-    ctx.fillText('🛏️', room.bedPosition.x, room.bedPosition.y + 5)
+    ctx.fillText(`${room.bedLevel}`, bedX + 24, bedY - 10)
     
     // BED UPGRADE INDICATOR: Show pulsing glow when player is sleeping and can upgrade
     if (humanPlayer.value && humanPlayer.value.roomId === room.id && humanPlayer.value.isSleeping) {
       const pulse = 0.3 + Math.sin(Date.now() / 200) * 0.2
       ctx.strokeStyle = `rgba(251, 191, 36, ${pulse})`
       ctx.lineWidth = 3
-      ctx.strokeRect(room.bedPosition.x - 28, room.bedPosition.y - 18, 56, 36)
+      ctx.strokeRect(bedX - 30, bedY - 20, 60, 40)
       // Show upgrade arrow
       ctx.fillStyle = '#fbbf24'
       ctx.font = 'bold 14px Arial'
-      ctx.fillText('⬆', room.bedPosition.x + 30, room.bedPosition.y - 8)
+      ctx.fillText('▲', bedX + 32, bedY - 10)
     }
     
     // Build spots - highlight green when player is in this room
@@ -3755,9 +4355,29 @@ const render = () => {
       if (!ctx) return
       const hasBuilding = buildings.some(b => {
         const bPos = gridToWorld({ x: b.gridX, y: b.gridY }, cellSize)
-        return distance(bPos, spot) < 30
+        return b.hp > 0 && distance(bPos, spot) < 30
       })
-      if (!hasBuilding) {
+      
+      // Show destroyed spots differently
+      if (spot.isDestroyed) {
+        // Draw destroyed/ruined marker
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.2)'
+        ctx.fillRect(spot.x - 20, spot.y - 20, 40, 40)
+        ctx.strokeStyle = '#7f1d1d'
+        ctx.lineWidth = 2
+        ctx.setLineDash([3, 3])
+        ctx.strokeRect(spot.x - 20, spot.y - 20, 40, 40)
+        ctx.setLineDash([])
+        // Draw X mark
+        ctx.strokeStyle = '#ef4444'
+        ctx.lineWidth = 2
+        ctx.beginPath()
+        ctx.moveTo(spot.x - 12, spot.y - 12)
+        ctx.lineTo(spot.x + 12, spot.y + 12)
+        ctx.moveTo(spot.x + 12, spot.y - 12)
+        ctx.lineTo(spot.x - 12, spot.y + 12)
+        ctx.stroke()
+      } else if (!hasBuilding) {
         // Highlight more prominently if this is player's room
         if (isPlayerRoom && gamePhase.value === 'playing') {
           ctx.fillStyle = 'rgba(34, 197, 94, 0.3)'
@@ -3824,13 +4444,14 @@ const render = () => {
       ctx.beginPath()
       ctx.arc(0, 0, 12, 0, Math.PI * 2)
       ctx.fill()
-      // Ghost icon effect
+      // Ghost icon effect - draw a spirit shape
       const pulse = Math.sin(Date.now() / 300) * 3
-      ctx.fillStyle = 'rgba(255,255,255,0.6)'
-      ctx.font = '16px Arial'
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'middle'
-      ctx.fillText('👻', 0, pulse)
+      ctx.fillStyle = 'rgba(255,255,255,0.7)'
+      ctx.beginPath()
+      ctx.moveTo(0, -8 + pulse)
+      ctx.bezierCurveTo(-6, -4 + pulse, -6, 6 + pulse, 0, 8 + pulse)
+      ctx.bezierCurveTo(6, 6 + pulse, 6, -4 + pulse, 0, -8 + pulse)
+      ctx.fill()
     } else if (building.type === 'vanguard') {
       // Vanguard Barracks - military tent/barracks style
       ctx.fillRect(-22, -18, 44, 36)
@@ -3844,12 +4465,18 @@ const render = () => {
       ctx.lineTo(24, -24)
       ctx.lineTo(14, -18)
       ctx.fill()
-      // Sword emblem
-      ctx.fillStyle = '#c0c0c0'
-      ctx.font = '16px Arial'
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'middle'
-      ctx.fillText('⚔️', 0, 2)
+      // Sword emblem - draw crossed swords
+      ctx.strokeStyle = '#c0c0c0'
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.moveTo(-8, -6)
+      ctx.lineTo(8, 6)
+      ctx.moveTo(8, -6)
+      ctx.lineTo(-8, 6)
+      ctx.stroke()
+      // Handle
+      ctx.fillStyle = '#fbbf24'
+      ctx.fillRect(-2, 8, 4, 4)
       // Show unit count
       const unitCount = getVanguardUnitCount(building.level)
       const aliveUnits = vanguards.filter(v => v.buildingId === building.id && v.state !== 'dead').length
@@ -4002,8 +4629,14 @@ const render = () => {
     ctx.beginPath()
     ctx.ellipse(-10, 2, 6, 10, 0, 0, Math.PI * 2)
     ctx.fill()
-    ctx.fillStyle = '#1d4ed8'
-    ctx.fillText('⚔', -12, 6)
+    ctx.strokeStyle = '#1d4ed8'
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.moveTo(-13, 0)
+    ctx.lineTo(-7, 0)
+    ctx.moveTo(-10, -3)
+    ctx.lineTo(-10, 3)
+    ctx.stroke()
     
     ctx.restore()
     
@@ -4019,12 +4652,12 @@ const render = () => {
       ctx.fillStyle = '#ef4444'
       ctx.font = '10px Arial'
       ctx.textAlign = 'center'
-      ctx.fillText('⚔️', x, y - 32)
+      ctx.fillText('⚔', x, y - 32)
     } else if (unit.state === 'roaming') {
       ctx.fillStyle = '#3b82f6'
       ctx.font = '10px Arial'
       ctx.textAlign = 'center'
-      ctx.fillText('👁️', x, y - 32)
+      ctx.fillText('◎', x, y - 32)
     }
   })
   
@@ -4041,7 +4674,7 @@ const render = () => {
     ctx.fillStyle = 'rgba(99, 102, 241, 0.4)'
     ctx.font = '10px Arial'
     ctx.textAlign = 'center'
-    ctx.fillText(`👻 ${Math.ceil(unit.respawnTimer)}s`, buildingPos.x, buildingPos.y + 30)
+    ctx.fillText(`✧ ${Math.ceil(unit.respawnTimer)}s`, buildingPos.x, buildingPos.y + 30)
   })
   
   // Draw players
@@ -4089,9 +4722,13 @@ const render = () => {
       ctx.stroke()
       
       // Zzz
-      ctx.fillStyle = '#fff'
-      ctx.font = '12px Arial'
-      ctx.fillText('💤', 15, -20)
+      ctx.fillStyle = '#60a5fa'
+      ctx.font = 'bold 10px Arial'
+      ctx.fillText('Z', 12, -22)
+      ctx.font = 'bold 8px Arial'
+      ctx.fillText('z', 18, -16)
+      ctx.font = 'bold 6px Arial'
+      ctx.fillText('z', 22, -12)
     } else {
       ctx.beginPath()
       ctx.arc(-5, -8, 3, 0, Math.PI * 2)
@@ -4124,110 +4761,53 @@ const render = () => {
     ctx.fillRect(x - 20, y - 35, 40 * hpPercent, 8)
   })
   
-  // Draw monsters
+  // Draw monsters using renderingSystem
   for (const monster of monsters) {
     if (ctx && monster.hp > 0) {
-      const { x, y } = monster.position
-      
-      // Shadow
-      ctx.fillStyle = 'rgba(0,0,0,0.6)'
-      ctx.beginPath()
-      ctx.ellipse(x, y + 30, 32, 16, 0, 0, Math.PI * 2)
-      ctx.fill()
-      
-      const bounce = monster.state === 'walking' ? Math.sin(monster.animationFrame * Math.PI / 2) * 5 : 0
-      
-      ctx.save()
-      ctx.translate(x, y + bounce)
-      if (!monster.facingRight) ctx.scale(-1, 1)
-      
-      // Body
-      ctx.fillStyle = monster.isRetreating ? '#581c87' : '#7c3aed'
-      ctx.beginPath()
-      ctx.ellipse(0, 0, 35, 45, 0, 0, Math.PI * 2)
-      ctx.fill()
-      
-      // Horns
-      ctx.fillStyle = '#44403c'
-      ctx.beginPath()
-      ctx.moveTo(-18, -32)
-      ctx.lineTo(-12, -55)
-      ctx.lineTo(-6, -32)
-      ctx.fill()
-      ctx.beginPath()
-      ctx.moveTo(6, -32)
-      ctx.lineTo(12, -55)
-      ctx.lineTo(18, -32)
-      ctx.fill()
-      
-      // Eyes
-      ctx.fillStyle = '#ef4444'
-      ctx.shadowColor = '#ef4444'
-      ctx.shadowBlur = 15
-      ctx.beginPath()
-      ctx.arc(-12, -12, 7, 0, Math.PI * 2)
-      ctx.arc(12, -12, 7, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.shadowBlur = 0
-      
-      // Healing effect
-      if (monster.state === 'healing') {
-        ctx.strokeStyle = '#22c55e'
-        ctx.lineWidth = 4
-        ctx.beginPath()
-        ctx.arc(0, 0, 50 + Math.sin(Date.now() / 150) * 8, 0, Math.PI * 2)
-        ctx.stroke()
-      }
-      
-      // Attack effect
-      if (monster.state === 'attacking') {
-        ctx.strokeStyle = '#ef4444'
-        ctx.lineWidth = 4
-        ctx.beginPath()
-        ctx.moveTo(25, 0)
-        ctx.lineTo(50, -5)
-        ctx.stroke()
-      }
-      
-      ctx.restore()
-      
-      // HP bar
-      const hpPercent = monster.hp / monster.maxHp
-      ctx.fillStyle = '#222'
-      ctx.fillRect(x - 40, y - 65, 80, 12)
-      ctx.fillStyle = hpPercent > 0.5 ? '#a855f7' : hpPercent > 0.2 ? '#eab308' : '#ef4444'
-      ctx.fillRect(x - 40, y - 65, 80 * hpPercent, 12)
-      ctx.strokeStyle = '#444'
-      ctx.lineWidth = 1
-      ctx.strokeRect(x - 40, y - 65, 80, 12)
-      
-      // Monster level badge
-      ctx.fillStyle = '#7c3aed'
-      ctx.beginPath()
-      ctx.arc(x + 50, y - 60, 14, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.fillStyle = '#fff'
-      ctx.font = 'bold 12px Arial'
-      ctx.textAlign = 'center'
-      ctx.fillText(`${monster.level}`, x + 50, y - 56)
-      
-      ctx.fillStyle = '#fff'
-      ctx.font = '10px Arial'
-      ctx.textAlign = 'center'
-      ctx.fillText(`${Math.floor(monster.hp)}/${monster.maxHp}`, x, y - 75)
+      renderMonster(ctx, monster)
     }
   }
   
   // Draw projectiles
   projectiles.forEach(proj => {
     if (!ctx) return
-    ctx.fillStyle = proj.color
-    ctx.shadowColor = proj.color
-    ctx.shadowBlur = 12
-    ctx.beginPath()
-    ctx.arc(proj.position.x, proj.position.y, proj.size, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.shadowBlur = 0
+    const skillProj = proj as (Projectile & { isSkillArrow?: boolean })
+    
+    // Draw skill arrow differently
+    if (skillProj.isSkillArrow) {
+      ctx.save()
+      const angle = Math.atan2(proj.target.y - proj.position.y, proj.target.x - proj.position.x)
+      ctx.translate(proj.position.x, proj.position.y)
+      ctx.rotate(angle)
+      
+      // Arrow shaft
+      ctx.fillStyle = '#6366f1'
+      ctx.fillRect(-20, -2, 25, 4)
+      
+      // Arrow head
+      ctx.beginPath()
+      ctx.moveTo(8, 0)
+      ctx.lineTo(-2, -6)
+      ctx.lineTo(-2, 6)
+      ctx.closePath()
+      ctx.fill()
+      
+      // Glow effect
+      ctx.shadowColor = '#6366f1'
+      ctx.shadowBlur = 15
+      ctx.fillRect(-20, -2, 25, 4)
+      ctx.shadowBlur = 0
+      
+      ctx.restore()
+    } else {
+      ctx.fillStyle = proj.color
+      ctx.shadowColor = proj.color
+      ctx.shadowBlur = 12
+      ctx.beginPath()
+      ctx.arc(proj.position.x, proj.position.y, proj.size, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.shadowBlur = 0
+    }
   })
   
   // Draw particles
@@ -4303,28 +4883,11 @@ const render = () => {
       if (room.doorIsRepairing) {
         renderCtx.fillStyle = '#22c55e'
         renderCtx.font = 'bold 12px Arial'
-        renderCtx.fillText('🔧', doorPx + GAME_CONSTANTS.CELL_SIZE / 2, barY - 8)
+        renderCtx.fillText('⚙', doorPx + GAME_CONSTANTS.CELL_SIZE / 2, barY - 8)
       }
     })
     
     renderCtx.restore()
-  }
-  
-  // Monster spawn countdown overlay - only shown before monster is active
-  if (ctx && !monsterActive.value && gamePhase.value === 'playing') {
-    // Semi-transparent banner at top instead of full overlay
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'
-    ctx.fillRect(0, 0, canvas.width, 120)
-    
-    // Countdown number - smaller, positioned at top center
-    ctx.fillStyle = '#fbbf24'
-    ctx.font = 'bold 48px Arial'
-    ctx.textAlign = 'center'
-    ctx.fillText('🐉 ' + Math.ceil(countdown.value).toString() + 's', canvas.width / 2, 55)
-    
-    ctx.fillStyle = '#fff'
-    ctx.font = '18px Arial'
-    ctx.fillText('Quái vật sẽ săn lùng sau thời gian đếm ngược!', canvas.width / 2, 90)
   }
 }
 
@@ -4348,14 +4911,6 @@ const restartGame = () => {
   latePlayers.length = 0 // Reset late players tracking
   messageLog.value = []
 
-  // Reset healing points
-  healingPoints.length = 0
-  initHealingPoints()
-
-  // Reset monsters
-  monsters.length = 0
-  initMonsters()
-
   // Reset players, rooms, grid
   gamePhase.value = 'playing' // Game starts immediately
   countdown.value = timingConfig.value.countdownTime
@@ -4364,8 +4919,18 @@ const restartGame = () => {
   victory.value = false
 
   initGrid()
+  
+  // Reset healing points with new random positions
+  healingPoints.length = 0
+  initHealingPoints()
+  markHealZonesOnGrid() // Mark heal zones after random positions set
+
   initRooms()
   initPlayers()
+
+  // Reset monsters
+  monsters.length = 0
+  initMonsters()
 
   // Camera reset
   camera.x = 0
@@ -4376,7 +4941,28 @@ const restartGame = () => {
   animationId = requestAnimationFrame(gameLoop)
 }
 
-const backToHome = () => {
+// Pause modal state
+const showPauseModal = ref(false)
+const isPaused = ref(false)
+
+const requestExit = () => {
+  showPauseModal.value = true
+  isPaused.value = true
+  // Pause game loop by not requesting next frame
+}
+
+const resumeGame = () => {
+  showPauseModal.value = false
+  isPaused.value = false
+  // Resume game loop
+  if (!gameOver.value) {
+    lastTime = performance.now()
+    animationId = requestAnimationFrame(gameLoop)
+  }
+}
+
+const confirmExit = () => {
+  showPauseModal.value = false
   if (animationId) cancelAnimationFrame(animationId)
   stopBgm()
   emit('back-home')
@@ -4394,9 +4980,10 @@ onMounted(() => {
     if (canvasRef.value) {
       ctx = canvasRef.value.getContext('2d')
       initGrid()
+      initHealingPoints() // Initialize healing points for monster (random positions)
+      markHealZonesOnGrid() // Mark heal zones on grid based on randomized positions
       initRooms()
       initPlayers()
-      initHealingPoints() // Initialize healing points for monster
       initMonsters() // Initialize monsters based on difficulty
       initAudio()
       startBgm()
@@ -4424,26 +5011,85 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="relative flex h-screen flex-col bg-neutral-950 text-white overflow-hidden">
-    <!-- Top Bar - Semi-transparent for mobile -->
+  <div class="relative flex h-screen flex-col bg-neutral-950 text-white overflow-hidden font-game-body">
+    <!-- Top Bar - Navbar -->
     <div class="flex items-center justify-between border-b border-neutral-800/50 bg-neutral-900/70 backdrop-blur-sm px-3 py-1.5 z-20">
-      <button class="text-neutral-400 hover:text-white transition text-sm px-2 py-1" @click="backToHome">{{ t('ui.back') }}</button>
+      <button class="text-neutral-400 hover:text-white transition text-sm px-2 py-1 shrink-0 font-game" @click="requestExit">{{ t('ui.back') }}</button>
       
-      <div class="flex items-center gap-2">
-        <div class="rounded-lg bg-neutral-800/60 px-3 py-1 text-xs">
-          <span v-if="!monsterActive" class="font-bold text-amber-400">{{ t('ui.spawnsIn', { time: Math.ceil(countdown) }) }}</span>
-          <span v-else class="font-bold text-red-400">{{ t('ui.monsterActive') }}</span>
-        </div>
-        <div v-if="getFirstMonster()" class="rounded-lg bg-red-900/40 px-3 py-1 text-xs">
-          👹 <span class="font-bold text-red-400">LV{{ getFirstMonster()!.level }} {{ Math.floor(getFirstMonster()!.hp) }}/{{ getFirstMonster()!.maxHp }}</span>
+      <!-- Monster Cards in Navbar (horizontal list, no scroll) -->
+      <div class="flex items-center gap-2 flex-1 justify-center">
+        <!-- All Monsters -->
+        <button 
+          v-for="monster in monsters.filter(m => m.hp > 0)" 
+          :key="monster.id"
+          class="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-gradient-to-br from-red-900/80 to-red-950/80 border border-red-500/50 hover:border-red-400 hover:from-red-800/80 transition-all shadow-lg"
+          @click="focusOnMonster(monster)"
+        >
+          <div class="w-8 h-8 rounded-full flex items-center justify-center border-2 border-red-400/50 shadow-inner"
+               :class="monster.name === 'Vong hồn kỵ sỹ' ? 'bg-gradient-to-br from-indigo-500 to-indigo-700' : 'bg-gradient-to-br from-purple-500 to-purple-700'">
+            <GameIcons name="monster" :size="18" class="text-white drop-shadow-lg" />
+          </div>
+          <div class="text-left min-w-[60px]">
+            <div class="text-[9px] font-game text-red-200 truncate max-w-[60px]">{{ monster.name }}</div>
+            <div class="flex items-center gap-1">
+              <span class="text-[10px] font-game text-amber-400">LV{{ monster.level }}</span>
+            </div>
+            <!-- HP Bar -->
+            <div class="w-full h-1.5 bg-red-950 rounded-full overflow-hidden border border-red-800/50 mt-0.5">
+              <div class="h-full bg-gradient-to-r from-red-500 to-red-400 transition-all" :style="{ width: (monster.hp / monster.maxHp * 100) + '%' }"></div>
+            </div>
+            <div class="text-[8px] text-red-300/80 font-game">{{ Math.floor(monster.hp) }}/{{ monster.maxHp }}</div>
+            <!-- Level Progress Bar (blue) - below HP -->
+            <div class="w-full h-1 bg-blue-950 rounded-full overflow-hidden border border-blue-800/50 mt-0.5">
+              <div class="h-full bg-gradient-to-r from-blue-500 to-blue-400 transition-all" 
+                   :style="{ width: (monster.levelUpTime > 0 ? (monster.levelTimer / monster.levelUpTime * 100) : 0) + '%' }"></div>
+            </div>
+          </div>
+        </button>
+        
+        <!-- Dead monsters indicator -->
+        <div v-if="monsters.some(m => m.hp <= 0)" class="text-[10px] text-neutral-500 flex items-center gap-1">
+          <GameIcons name="skull" :size="14" />
+          <span class="font-game">{{ monsters.filter(m => m.hp <= 0).length }}</span>
         </div>
       </div>
       
-      <div class="flex items-center gap-2 text-xs">
-        <span class="text-amber-400 font-bold">💰{{ Math.floor(humanPlayer?.gold || 0) }}</span>
-        <span class="text-violet-400 font-bold">👻{{ humanPlayer?.souls || 0 }}</span>
-        <span class="text-red-400">❤️{{ humanPlayer?.hp || 0 }}</span>
-        <span v-if="humanPlayer?.isSleeping" class="text-blue-400">💤 {{ Math.floor(humanPlayer?.sleepTimer || 0) }}s</span>
+      <div class="w-16 shrink-0"></div> <!-- Spacer for balance -->
+    </div>
+
+    <!-- Player Resources Panel - Top Right (below navbar) -->
+    <div class="absolute top-14 right-3 z-10">
+      <div class="game-panel rounded-xl bg-neutral-900/80 backdrop-blur-sm border border-white/10 p-3 min-w-[140px]">
+        <div class="text-[10px] text-neutral-400 mb-1.5 font-game">{{ humanPlayer?.name || 'You' }}</div>
+        <div class="flex flex-col gap-2">
+          <div class="flex items-center gap-2">
+            <GameIcons name="gold" :size="24" />
+            <div class="flex-1">
+              <div class="text-xl font-game glow-gold">{{ Math.floor(humanPlayer?.gold || 0) }}</div>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <GameIcons name="soul" :size="24" />
+            <div class="flex-1">
+              <div class="text-xl font-game glow-purple">{{ humanPlayer?.souls || 0 }}</div>
+            </div>
+          </div>
+          <div class="border-t border-white/10 pt-2 mt-1">
+            <div class="flex items-center gap-2">
+              <GameIcons name="heart" :size="18" />
+              <div class="flex-1">
+                <div class="w-full h-2 bg-neutral-800 rounded-full overflow-hidden">
+                  <div class="h-full bg-red-500 transition-all" :style="{ width: ((humanPlayer?.hp || 0) / (humanPlayer?.maxHp || 100) * 100) + '%' }"></div>
+                </div>
+                <div class="text-[10px] text-red-400">{{ humanPlayer?.hp || 0 }}/{{ humanPlayer?.maxHp || 100 }}</div>
+              </div>
+            </div>
+          </div>
+          <div v-if="humanPlayer?.isSleeping" class="text-xs text-blue-400 flex items-center gap-1">
+            <GameIcons name="sleep" :size="16" />
+            <span class="font-game">{{ Math.floor(humanPlayer?.sleepTimer || 0) }}s</span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -4465,120 +5111,255 @@ onUnmounted(() => {
         @touchend="handleTouchEnd"
       ></canvas>
 
-      <!-- Center-Bottom: Movement Controls - Hidden when sleeping -->
+      <!-- Monster Countdown Overlay (HTML for crisp text) -->
+      <Transition name="popup">
+        <div 
+          v-if="!monsterActive && gamePhase === 'playing'"
+          class="absolute top-0 left-0 right-0 z-30 pointer-events-none"
+        >
+          <div class="bg-gradient-to-b from-black/90 via-black/70 to-transparent pt-4 pb-12 px-4">
+            <div class="flex flex-col items-center justify-center">
+              <!-- Warning Icon & Countdown -->
+              <div class="flex items-center gap-3 mb-2">
+                <div class="w-12 h-12 rounded-full bg-gradient-to-br from-amber-500 to-red-600 flex items-center justify-center animate-pulse shadow-lg shadow-amber-500/30">
+                  <GameIcons name="timer" :size="28" class="text-white" />
+                </div>
+                <div class="font-game text-5xl text-amber-400 glow-gold drop-shadow-lg">
+                  {{ Math.ceil(countdown) }}s
+                </div>
+              </div>
+              <!-- Warning Text -->
+              <div class="font-game-body text-lg text-white/90 text-center drop-shadow-md">
+                Quái vật sẽ <span class="text-red-400 font-game">SĂN LÙNG</span> sau thời gian đếm ngược!
+              </div>
+              <!-- Progress Bar -->
+              <div class="w-64 h-2 bg-neutral-800/80 rounded-full mt-3 overflow-hidden border border-amber-500/30">
+                <div 
+                  class="h-full bg-gradient-to-r from-amber-500 to-red-500 transition-all duration-100"
+                  :style="{ width: (100 - (countdown / timingConfig.countdownTime * 100)) + '%' }"
+                ></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- Center-Bottom: Joystick Controls - Hidden when sleeping -->
       <div 
         v-if="gamePhase === 'playing' && humanPlayer?.alive && !humanPlayer?.isSleeping"
         class="absolute bottom-4 left-1/2 -translate-x-1/2 z-20"
       >
-        <div class="rounded-2xl bg-black/40 backdrop-blur-sm p-2 border border-white/10">
-          <div class="grid grid-cols-3 gap-1" style="width: 150px;">
-            <div></div>
-            <button 
-              class="w-12 h-12 bg-white/20 hover:bg-white/30 active:bg-amber-500/70 rounded-xl flex items-center justify-center text-2xl font-bold touch-manipulation select-none transition-colors"
-              @mousedown.prevent="startMove('up')"
-              @mouseup.prevent="stopMoveDir('up')"
-              @mouseleave="stopMoveDir('up')"
-              @touchstart.prevent="startMove('up')"
-              @touchend.prevent="stopMoveDir('up')"
-            >↑</button>
-            <div></div>
-            <button 
-              class="w-12 h-12 bg-white/20 hover:bg-white/30 active:bg-amber-500/70 rounded-xl flex items-center justify-center text-2xl font-bold touch-manipulation select-none transition-colors"
-              @mousedown.prevent="startMove('left')"
-              @mouseup.prevent="stopMoveDir('left')"
-              @mouseleave="stopMoveDir('left')"
-              @touchstart.prevent="startMove('left')"
-              @touchend.prevent="stopMoveDir('left')"
-            >←</button>
-            <div class="w-12 h-12 bg-white/10 rounded-xl flex items-center justify-center text-lg text-white/50">🎮</div>
-            <button 
-              class="w-12 h-12 bg-white/20 hover:bg-white/30 active:bg-amber-500/70 rounded-xl flex items-center justify-center text-2xl font-bold touch-manipulation select-none transition-colors"
-              @mousedown.prevent="startMove('right')"
-              @mouseup.prevent="stopMoveDir('right')"
-              @mouseleave="stopMoveDir('right')"
-              @touchstart.prevent="startMove('right')"
-              @touchend.prevent="stopMoveDir('right')"
-            >→</button>
-            <div></div>
-            <button 
-              class="w-12 h-12 bg-white/20 hover:bg-white/30 active:bg-amber-500/70 rounded-xl flex items-center justify-center text-2xl font-bold touch-manipulation select-none transition-colors"
-              @mousedown.prevent="startMove('down')"
-              @mouseup.prevent="stopMoveDir('down')"
-              @mouseleave="stopMoveDir('down')"
-              @touchstart.prevent="startMove('down')"
-              @touchend.prevent="stopMoveDir('down')"
-            >↓</button>
-            <div></div>
+        <!-- Joystick Container -->
+        <div 
+          ref="joystickRef"
+          class="relative w-[100px] h-[100px] rounded-full bg-black/50 backdrop-blur-sm border-2 border-white/20 touch-manipulation select-none"
+          @mousedown="handleJoystickStart"
+          @mousemove="handleJoystickMove"
+          @mouseup="handleJoystickEnd"
+          @mouseleave="handleJoystickEnd"
+          @touchstart="handleJoystickStart"
+          @touchmove="handleJoystickMove"
+          @touchend="handleJoystickEnd"
+          @touchcancel="handleJoystickEnd"
+        >
+          <!-- Outer ring decoration -->
+          <div class="absolute inset-2 rounded-full border border-white/10"></div>
+          
+          <!-- Direction indicators -->
+          <div class="absolute top-1 left-1/2 -translate-x-1/2 text-white/30 text-sm">▲</div>
+          <div class="absolute bottom-1 left-1/2 -translate-x-1/2 text-white/30 text-sm">▼</div>
+          <div class="absolute left-1 top-1/2 -translate-y-1/2 text-white/30 text-sm">◀</div>
+          <div class="absolute right-1 top-1/2 -translate-y-1/2 text-white/30 text-sm">▶</div>
+          
+          <!-- Joystick Knob -->
+          <div 
+            class="absolute w-10 h-10 rounded-full bg-gradient-to-br from-amber-400 to-amber-600 shadow-lg border-2 border-amber-300/50 transition-transform duration-75"
+            :class="joystickActive ? 'scale-90' : ''"
+            :style="{
+              left: `calc(50% - 20px + ${joystickPosition.x}px)`,
+              top: `calc(50% - 20px + ${joystickPosition.y}px)`
+            }"
+          >
+            <!-- Knob highlight -->
+            <div class="absolute inset-1 rounded-full bg-gradient-to-br from-white/30 to-transparent"></div>
           </div>
         </div>
       </div>
 
-      <!-- Left Side: Action Buttons -->
-      <div class="absolute bottom-4 left-3 flex flex-col gap-2 z-10">
+      <!-- BOTTOM-RIGHT: Quick Action Buttons (Circular on mobile) -->
+      <div class="absolute bottom-20 right-4 flex flex-col gap-3 z-10">
         <!-- Sleep Button (when near bed) -->
         <Transition name="popup">
           <button 
             v-if="isNearBed && gamePhase === 'playing' && !humanPlayer?.isSleeping"
-            class="px-4 py-3 bg-blue-600/80 hover:bg-blue-500/80 backdrop-blur-sm rounded-xl text-sm font-bold shadow-lg border border-blue-400/30"
+            class="game-btn w-14 h-14 bg-blue-600/90 hover:bg-blue-500/90 backdrop-blur-sm rounded-full shadow-lg border-2 border-blue-400/50 flex items-center justify-center"
             @click="goToSleep"
+            :title="!monsterActive && currentNearRoom?.ownerId === null ? t('ui.claimAndSleep') : t('ui.sleep')"
           >
-            🛏️ {{ !monsterActive && currentNearRoom?.ownerId === null ? t('ui.claimAndSleep') : t('ui.sleep') }}
+            <GameIcons name="bed" :size="24" />
           </button>
         </Transition>
-    
-        
+
         <!-- Camera reset button -->
-        <button 
-          v-if="cameraManualMode"
-          class="px-3 py-2 bg-white/10 hover:bg-white/20 backdrop-blur-sm rounded-lg text-xs font-medium border border-white/10"
-          @click="resetCameraToPlayer"
-        >
-          {{ t('ui.followPlayer') }}
-        </button>
+        <Transition name="popup">
+          <button 
+            v-if="cameraManualMode"
+            class="game-btn w-14 h-14 bg-neutral-800/90 hover:bg-neutral-700/90 backdrop-blur-sm rounded-full shadow-lg border-2 border-white/30 flex items-center justify-center"
+            @click="resetCameraToPlayer"
+            :title="t('ui.followPlayer')"
+          >
+            <GameIcons name="target" :size="24" />
+          </button>
+        </Transition>
+
+        <!-- Door Repair Button (when player owns a room with damaged door) -->
+        <Transition name="popup">
+          <button 
+            v-if="gamePhase === 'playing' && humanPlayer?.alive && playerOwnedRoom && playerOwnedRoom.doorHp > 0 && playerOwnedRoom.doorHp < playerOwnedRoom.doorMaxHp"
+            class="game-btn relative w-14 h-14 rounded-full shadow-lg border-2 flex items-center justify-center overflow-hidden"
+            :class="[
+              playerOwnedRoom.doorRepairCooldown > 0 || playerOwnedRoom.doorIsRepairing
+                ? 'bg-neutral-700/90 border-neutral-500 cursor-not-allowed' 
+                : 'bg-green-600/90 hover:bg-green-500/90 border-green-400 cursor-pointer'
+            ]"
+            :disabled="playerOwnedRoom.doorRepairCooldown > 0 || playerOwnedRoom.doorIsRepairing"
+            @click="startDoorRepairFromButton"
+            title="Sửa cửa"
+          >
+            <!-- Cooldown Overlay (circular progress) -->
+            <svg 
+              v-if="playerOwnedRoom.doorRepairCooldown > 0"
+              class="absolute inset-0 w-full h-full -rotate-90"
+              viewBox="0 0 100 100"
+            >
+              <circle 
+                cx="50" cy="50" r="45" 
+                fill="none" 
+                stroke="#374151" 
+                stroke-width="10"
+              />
+              <circle 
+                cx="50" cy="50" r="45" 
+                fill="none" 
+                stroke="#22c55e" 
+                stroke-width="10"
+                stroke-linecap="round"
+                :stroke-dasharray="283"
+                :stroke-dashoffset="283 * (playerOwnedRoom.doorRepairCooldown / 50)"
+                class="transition-all duration-200"
+              />
+            </svg>
+            <!-- Repairing animation -->
+            <div v-if="playerOwnedRoom.doorIsRepairing" class="absolute inset-0 bg-green-500/30 animate-pulse rounded-full"></div>
+            <!-- Icon -->
+            <GameIcons 
+              name="settings" 
+              :size="24" 
+              :class="playerOwnedRoom.doorIsRepairing ? 'animate-spin' : ''"
+            />
+            <!-- Cooldown text -->
+            <div 
+              v-if="playerOwnedRoom.doorRepairCooldown > 0" 
+              class="absolute inset-0 flex items-center justify-center font-game text-xs text-white bg-black/50 rounded-full"
+            >
+              {{ Math.ceil(playerOwnedRoom.doorRepairCooldown) }}s
+            </div>
+          </button>
+        </Transition>
       </div>
 
-      <!-- TOP-LEFT: Player & Monster Status Panel -->
-      <div class="absolute top-3 left-3 flex flex-col gap-1.5 z-10">
-        <!-- Monster Avatar (clickable) -->
-        <button 
-          v-if="monsterActive && getFirstMonster()"
-          class="flex items-center gap-2 px-2 py-1.5 rounded-lg backdrop-blur-sm border transition-all hover:scale-105"
-          :class="getFirstMonster()!.hp > 0 ? 'bg-red-900/60 border-red-500/50 hover:bg-red-800/70' : 'bg-neutral-800/60 border-neutral-600/50'"
-          @click="navigateToMonster"
-        >
-          <div class="w-8 h-8 rounded-full flex items-center justify-center text-lg" :class="getFirstMonster()!.hp > 0 ? 'bg-red-600' : 'bg-neutral-600'">
-            👹
+      <!-- TOP-LEFT: Hero Status Panel -->
+      <!-- Mobile: Compact grid of avatars (3 columns) -->
+      <div class="absolute top-3 left-3 z-10 sm:hidden">
+        <div class="game-panel rounded-xl bg-neutral-900/80 backdrop-blur-sm border border-white/10 p-2">
+          <div class="grid grid-cols-3 gap-1.5">
+            <button 
+              v-for="player in players" 
+              :key="player.id"
+              class="flex flex-col items-center gap-0.5 p-1 rounded-lg transition-all hover:bg-white/10"
+              :class="player.isHuman ? 'ring-1 ring-amber-400/50 bg-amber-500/10' : ''"
+              @click="navigateToPlayer(player)"
+            >
+              <!-- Avatar with status ring -->
+              <div 
+                class="relative w-9 h-9 rounded-full flex items-center justify-center border-2 shrink-0"
+                :class="player.alive ? 'border-green-400' : 'border-red-500'"
+                :style="{ backgroundColor: player.color + 'cc' }"
+              >
+                <GameIcons :name="player.isHuman ? 'player' : 'bot'" :size="18" />
+                <!-- Status indicator -->
+                <div 
+                  class="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center border border-neutral-800"
+                  :class="player.alive ? (player.isSleeping ? 'bg-blue-500' : 'bg-green-500') : 'bg-red-600'"
+                >
+                  <GameIcons v-if="player.alive && player.isSleeping" name="sleep" :size="8" />
+                  <GameIcons v-else-if="!player.alive" name="skull" :size="8" />
+                </div>
+              </div>
+              <!-- Name -->
+              <div class="text-[8px] font-game truncate w-full text-center" :class="player.alive ? 'text-white' : 'text-red-400'">
+                {{ player.isHuman ? 'You' : player.name.replace('Bot-', 'B') }}
+              </div>
+            </button>
           </div>
-          <div class="text-left">
-            <div class="text-xs font-bold" :class="getFirstMonster()!.hp > 0 ? 'text-red-300' : 'text-neutral-400'">{{ t('terms.monster') }}</div>
-            <div class="text-[10px]" :class="getFirstMonster()!.hp > 0 ? 'text-red-400/80' : 'text-neutral-500'">LV{{ getFirstMonster()!.level }}</div>
-          </div>
-        </button>
-        
-        <!-- Player Avatars (clickable) -->
+        </div>
+      </div>
+      
+      <!-- Desktop: Full cards -->
+      <div class="absolute top-3 left-3 hidden sm:flex flex-col gap-1.5 z-10 max-h-[60vh] overflow-y-auto">
+        <!-- Player/Hero Cards -->
         <button 
           v-for="player in players" 
           :key="player.id"
-          class="flex items-center gap-2 px-2 py-1.5 rounded-lg backdrop-blur-sm border transition-all hover:scale-105"
+          class="game-panel flex items-center gap-2 px-2.5 py-2 rounded-xl backdrop-blur-sm border transition-all hover:scale-[1.02] min-w-[160px]"
           :class="[
             player.alive 
-              ? 'bg-green-900/60 border-green-500/50 hover:bg-green-800/70' 
-              : 'bg-red-900/60 border-red-500/50',
+              ? 'bg-neutral-900/80 border-white/10 hover:bg-neutral-800/80' 
+              : 'bg-red-950/60 border-red-500/30',
             player.isHuman ? 'ring-2 ring-amber-400/50' : ''
           ]"
           @click="navigateToPlayer(player)"
         >
           <div 
-            class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold border-2"
+            class="w-10 h-10 rounded-full flex items-center justify-center border-2 shrink-0"
             :class="player.alive ? 'border-green-400' : 'border-red-400'"
             :style="{ backgroundColor: player.color + 'cc' }"
           >
-            {{ player.isHuman ? '👤' : '🤖' }}
+            <GameIcons :name="player.isHuman ? 'player' : 'bot'" :size="24" />
           </div>
-          <div class="text-left">
-            <div class="text-xs font-bold" :class="player.alive ? 'text-green-300' : 'text-red-300'">{{ player.name }}</div>
-            <div class="text-[10px]" :class="player.alive ? 'text-green-400/80' : 'text-red-400/80'">
-              {{ player.alive ? (player.isSleeping ? t('ui.sleeping') : t('ui.active')) : t('ui.dead') }}
+          <div class="flex-1 text-left min-w-0">
+            <div class="text-xs font-game truncate" :class="player.alive ? 'text-white' : 'text-red-300'">
+              {{ player.name }}
+              <span v-if="player.isHuman" class="text-amber-400">(You)</span>
+            </div>
+            
+            <!-- HP Bar -->
+            <div class="flex items-center gap-1 mt-1">
+              <GameIcons name="heart" :size="12" />
+              <div class="flex-1 h-1.5 bg-neutral-700 rounded-full overflow-hidden">
+                <div 
+                  class="h-full transition-all" 
+                  :class="player.hp / player.maxHp > 0.5 ? 'bg-green-500' : player.hp / player.maxHp > 0.2 ? 'bg-yellow-500' : 'bg-red-500'"
+                  :style="{ width: (player.hp / player.maxHp * 100) + '%' }"
+                ></div>
+              </div>
+              <span class="text-[9px] text-neutral-400 w-8 font-game">{{ player.hp }}/{{ player.maxHp }}</span>
+            </div>
+            
+            <!-- Status & Resources Row -->
+            <div class="flex items-center gap-2 mt-1 text-[10px]">
+              <span :class="player.alive ? (player.isSleeping ? 'text-blue-400' : 'text-green-400') : 'text-red-400'">
+                <GameIcons v-if="player.alive && player.isSleeping" name="sleep" :size="12" />
+                <GameIcons v-else-if="player.alive" name="active" :size="12" />
+                <GameIcons v-else name="skull" :size="12" />
+              </span>
+              <span class="text-amber-400 flex items-center gap-0.5"><GameIcons name="gold" :size="10" />{{ Math.floor(player.gold) }}</span>
+              <span class="text-violet-400 flex items-center gap-0.5"><GameIcons name="soul" :size="10" />{{ player.souls }}</span>
+            </div>
+            
+            <!-- Bed Level (if player owns a room) -->
+            <div v-if="player.roomId !== null && player.roomId !== undefined" class="text-[10px] text-neutral-400 mt-0.5 flex items-center gap-1">
+              <GameIcons name="bed" :size="12" /> <span class="font-game">Lv{{ rooms[player.roomId]?.bedLevel || 1 }}</span>
             </div>
           </div>
         </button>
@@ -4605,71 +5386,95 @@ onUnmounted(() => {
           
           <!-- Door Upgrade -->
           <template v-if="upgradeTarget.type === 'door' && upgradeTarget.room">
-            <h2 class="mb-3 text-center font-bold text-lg" :class="upgradeTarget.room.doorHp <= 0 ? 'text-red-400' : 'text-blue-400'">
-              {{ upgradeTarget.room.doorHp <= 0 ? t('ui.doorDestroyed') : t('ui.door') }}
-            </h2>
-            <div class="text-center mb-4">
-              <div class="text-2xl font-bold">{{ t('terms.level') }} {{ upgradeTarget.room.doorLevel }}</div>
-              <div class="text-sm text-neutral-400">HP: {{ Math.floor(upgradeTarget.room.doorHp) }}/{{ upgradeTarget.room.doorMaxHp }}</div>
-              <div v-if="upgradeTarget.room.doorIsRepairing" class="text-xs text-green-400 mt-1">
-                🔧 Repairing... {{ Math.floor((upgradeTarget.room.doorRepairTimer / GAME_CONSTANTS.DOOR_REPAIR_DURATION) * 100) }}%
+            <div class="flex items-center justify-center gap-3 mb-4">
+              <GameIcons name="shield" :size="32" />
+              <h2 class="font-game text-xl" :class="upgradeTarget.room.doorHp <= 0 ? 'text-red-400' : 'text-blue-400'">
+                {{ upgradeTarget.room.doorHp <= 0 ? t('ui.doorDestroyed') : t('ui.door') }}
+              </h2>
+            </div>
+            
+            <!-- Current Stats -->
+            <div class="bg-neutral-800/50 rounded-xl p-4 mb-4 border" :class="upgradeTarget.room.doorHp <= 0 ? 'border-red-500/30' : 'border-blue-500/20'">
+              <div class="flex items-center justify-between mb-3">
+                <span class="text-neutral-400 text-sm">{{ t('terms.level') }}</span>
+                <span class="font-game text-2xl" :class="upgradeTarget.room.doorHp <= 0 ? 'text-red-400' : 'text-blue-400'">{{ upgradeTarget.room.doorLevel }}</span>
+              </div>
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-neutral-400 text-sm flex items-center gap-1.5">
+                  <GameIcons name="health" :size="14" /> HP
+                </span>
+                <span class="font-game text-lg" :class="upgradeTarget.room.doorHp <= 0 ? 'text-red-400' : 'text-green-300'">{{ Math.floor(upgradeTarget.room.doorHp) }}/{{ upgradeTarget.room.doorMaxHp }}</span>
+              </div>
+              <!-- HP Bar -->
+              <div class="w-full h-2 bg-neutral-700 rounded-full overflow-hidden">
+                <div 
+                  class="h-full transition-all duration-300"
+                  :class="upgradeTarget.room.doorHp <= 0 ? 'bg-red-500' : upgradeTarget.room.doorHp / upgradeTarget.room.doorMaxHp > 0.5 ? 'bg-green-500' : upgradeTarget.room.doorHp / upgradeTarget.room.doorMaxHp > 0.25 ? 'bg-yellow-500' : 'bg-red-500'"
+                  :style="{ width: (upgradeTarget.room.doorHp / upgradeTarget.room.doorMaxHp * 100) + '%' }"
+                ></div>
+              </div>
+              <div v-if="upgradeTarget.room.doorIsRepairing" class="text-xs text-green-400 mt-2 flex items-center justify-center gap-1">
+                <GameIcons name="settings" :size="12" class="animate-spin" /> Đang sửa chữa... {{ Math.floor((upgradeTarget.room.doorRepairTimer / GAME_CONSTANTS.DOOR_REPAIR_DURATION) * 100) }}%
               </div>
             </div>
+            
             <div class="flex flex-col gap-2">
-              <!-- REBUILD button when door is destroyed -->
+              <!-- Door DESTROYED - Cannot rebuild -->
               <template v-if="upgradeTarget.room.doorHp <= 0">
-                <div class="text-center text-red-400 text-sm mb-2">{{ t('ui.doorDestroyedDesc') }}</div>
-                <button 
-                  class="rounded-xl bg-amber-600 hover:bg-amber-500 py-3 font-bold text-white transition"
-                  :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < 100 }"
-                  :disabled="(humanPlayer?.gold || 0) < 100"
-                  @click="rebuildDoor">
-                  {{ t('ui.rebuildDoor', { cost: 100 }) }}
-                </button>
+                <div class="bg-red-900/30 rounded-xl p-4 mb-2 border border-red-500/30">
+                  <div class="flex items-center justify-center gap-2 text-red-400 mb-2">
+                    <span class="text-2xl">💀</span>
+                    <span class="font-game text-lg">CỬA ĐÃ BỊ PHÁ HỦY</span>
+                  </div>
+                  <div class="text-center text-red-300/70 text-sm">Cửa không thể xây lại sau khi bị phá hủy. Phòng này giờ không còn an toàn!</div>
+                </div>
               </template>
               
               <!-- Normal upgrade/repair when door exists -->
               <template v-else>
+                <!-- Upgrade Preview -->
+                <div v-if="upgradeTarget.room.doorLevel < 10" class="bg-gradient-to-r from-blue-900/30 to-blue-800/20 rounded-xl p-4 mb-2 border border-blue-500/30">
+                  <div class="text-xs text-blue-400/80 mb-2 font-game">SAU KHI NÂNG CẤP</div>
+                  <div class="flex items-center justify-between">
+                    <span class="text-neutral-300 text-sm flex items-center gap-1.5">
+                      <GameIcons name="health" :size="14" /> HP tối đa
+                    </span>
+                    <div class="flex items-center gap-2">
+                      <span class="text-neutral-500 line-through">{{ upgradeTarget.room.doorMaxHp }}</span>
+                      <span class="text-green-400">→</span>
+                      <span class="font-game text-lg text-green-400">{{ Math.floor(upgradeTarget.room.doorMaxHp * 1.5) }}</span>
+                    </div>
+                  </div>
+                </div>
+                
                 <!-- Upgrade button -->
                 <button 
                   v-if="upgradeTarget.room.doorLevel < 10"
-                  class="rounded-xl bg-blue-600 hover:bg-blue-500 py-3 font-bold text-white transition"
-                  :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < upgradeTarget.room.doorUpgradeCost || ((upgradeTarget.room.doorSoulCost || 0) > 0 && (humanPlayer?.souls || 0) < (upgradeTarget.room.doorSoulCost || 0)) }"
+                  class="game-btn rounded-xl py-3 font-game text-white transition-all shadow-lg flex items-center justify-center gap-2"
+                  :class="[
+                    (humanPlayer?.gold || 0) >= upgradeTarget.room.doorUpgradeCost && ((upgradeTarget.room.doorSoulCost || 0) <= 0 || (humanPlayer?.souls || 0) >= (upgradeTarget.room.doorSoulCost || 0))
+                      ? 'bg-gradient-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 ring-2 ring-green-400/50'
+                      : 'bg-gradient-to-r from-blue-600 to-blue-500 opacity-50 cursor-not-allowed'
+                  ]"
                   :disabled="(humanPlayer?.gold || 0) < upgradeTarget.room.doorUpgradeCost || ((upgradeTarget.room.doorSoulCost || 0) > 0 && (humanPlayer?.souls || 0) < (upgradeTarget.room.doorSoulCost || 0))"
                   @click="upgradeDoor">
-                  <template v-if="(upgradeTarget.room.doorSoulCost || 0) > 0">
-                    {{ t('ui.upgradeDoorWithSouls', { cost: upgradeTarget.room.doorUpgradeCost, souls: upgradeTarget.room.doorSoulCost }) }}
-                  </template>
-                  <template v-else>
-                    {{ t('ui.upgradeDoor', { cost: upgradeTarget.room.doorUpgradeCost }) }}
-                  </template>
+                  <GameIcons name="gold" :size="18" />
+                  <span>Nâng cấp ({{ upgradeTarget.room.doorUpgradeCost }}g)</span>
+                  <span v-if="(upgradeTarget.room.doorSoulCost || 0) > 0" class="flex items-center gap-1 ml-1">
+                    + <GameIcons name="soul" :size="14" /> {{ upgradeTarget.room.doorSoulCost }}
+                  </span>
                 </button>
-                <div v-else class="text-center text-green-400 py-2">{{ t('ui.maxLevel') }}</div>
+                <div v-else class="bg-green-900/30 rounded-xl p-3 border border-green-500/30">
+                  <div class="text-center text-green-400 font-game">{{ t('ui.maxLevel') }}</div>
+                </div>
                 
-                <!-- Repair button (circular indicator) -->
-                <button 
-                  class="rounded-xl bg-green-600 hover:bg-green-500 py-3 font-bold text-white transition relative overflow-hidden"
-                  :class="{ 
-                    'opacity-50 cursor-not-allowed': upgradeTarget.room.doorRepairCooldown > 0 || upgradeTarget.room.doorIsRepairing || upgradeTarget.room.doorHp >= upgradeTarget.room.doorMaxHp 
-                  }"
-                  :disabled="upgradeTarget.room.doorRepairCooldown > 0 || upgradeTarget.room.doorIsRepairing || upgradeTarget.room.doorHp >= upgradeTarget.room.doorMaxHp"
-                  @click="startDoorRepair">
-                  <span v-if="upgradeTarget.room.doorRepairCooldown > 0">
-                    {{ t('ui.repairCooldown', { time: Math.ceil(upgradeTarget.room.doorRepairCooldown) }) }}
-                  </span>
-                  <span v-else-if="upgradeTarget.room.doorIsRepairing">
-                    {{ t('ui.repairing') }}
-                  </span>
-                  <span v-else-if="upgradeTarget.room.doorHp >= upgradeTarget.room.doorMaxHp">
-                    {{ t('ui.fullHp') }}
-                  </span>
-                  <span v-else>
-                    {{ t('ui.repairDoor') }}
-                  </span>
-                </button>
+                <!-- Repair hint -->
+                <div v-if="upgradeTarget.room.doorHp < upgradeTarget.room.doorMaxHp" class="text-center text-xs text-neutral-400 py-2">
+                  Sử dụng nút <GameIcons name="settings" :size="14" class="inline" /> ở góc phải để sửa cửa
+                </div>
               </template>
               
-              <button class="rounded-xl border border-neutral-600 py-2 text-sm text-neutral-300 hover:bg-white/10 transition" @click="closeUpgradeModal">
+              <button class="game-btn rounded-xl border border-neutral-600 py-2 text-sm text-neutral-300 hover:bg-white/10 transition" @click="closeUpgradeModal">
                 {{ t('ui.cancel') }}
               </button>
             </div>
@@ -4677,25 +5482,57 @@ onUnmounted(() => {
           
           <!-- Bed Upgrade -->
           <template v-else-if="upgradeTarget.type === 'bed' && upgradeTarget.room">
-            <h2 class="mb-3 text-center font-bold text-lg text-amber-400">{{ t('ui.bed') }}</h2>
-            <div class="text-center mb-4">
-              <div class="text-2xl font-bold">{{ t('terms.level') }} {{ upgradeTarget.room.bedLevel }}</div>
-              <div class="text-sm text-neutral-400">{{ t('ui.goldPerSec', { rate: upgradeTarget.room.bedIncome }) }}</div>
+            <div class="flex items-center justify-center gap-3 mb-4">
+              <GameIcons name="bed" :size="32" />
+              <h2 class="font-game text-xl text-amber-400">{{ t('ui.bed') }}</h2>
             </div>
+            
+            <!-- Current Stats -->
+            <div class="bg-neutral-800/50 rounded-xl p-4 mb-4 border border-amber-500/20">
+              <div class="flex items-center justify-between mb-3">
+                <span class="text-neutral-400 text-sm">{{ t('terms.level') }}</span>
+                <span class="font-game text-2xl text-amber-400">{{ upgradeTarget.room.bedLevel }}</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-neutral-400 text-sm flex items-center gap-1.5">
+                  <GameIcons name="gold" :size="14" /> Thu nhập
+                </span>
+                <span class="font-game text-lg text-amber-300">{{ upgradeTarget.room.bedIncome }}/giây</span>
+              </div>
+            </div>
+            
+            <!-- Upgrade Preview -->
+            <div class="bg-gradient-to-r from-amber-900/30 to-amber-800/20 rounded-xl p-4 mb-4 border border-amber-500/30">
+              <div class="text-xs text-amber-400/80 mb-2 font-game">SAU KHI NÂNG CẤP</div>
+              <div class="flex items-center justify-between">
+                <span class="text-neutral-300 text-sm flex items-center gap-1.5">
+                  <GameIcons name="gold" :size="14" /> Thu nhập mới
+                </span>
+                <div class="flex items-center gap-2">
+                  <span class="text-neutral-500 line-through">{{ upgradeTarget.room.bedIncome }}</span>
+                  <span class="text-green-400">→</span>
+                  <span class="font-game text-lg text-green-400">{{ upgradeTarget.room.bedIncome * 2 }}/giây</span>
+                </div>
+              </div>
+            </div>
+            
             <div class="flex flex-col gap-2">
               <button 
-                class="rounded-xl bg-amber-600 hover:bg-amber-500 py-3 font-bold text-white transition"
-                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < upgradeTarget.room.bedUpgradeCost || ((upgradeTarget.room.bedSoulCost || 0) > 0 && (humanPlayer?.souls || 0) < (upgradeTarget.room.bedSoulCost || 0)) }"
+                class="game-btn rounded-xl py-3 font-game text-white transition-all shadow-lg flex items-center justify-center gap-2"
+                :class="[
+                  (humanPlayer?.gold || 0) >= upgradeTarget.room.bedUpgradeCost && ((upgradeTarget.room.bedSoulCost || 0) <= 0 || (humanPlayer?.souls || 0) >= (upgradeTarget.room.bedSoulCost || 0))
+                    ? 'bg-gradient-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 ring-2 ring-green-400/50'
+                    : 'bg-gradient-to-r from-amber-600 to-amber-500 opacity-50 cursor-not-allowed'
+                ]"
                 :disabled="(humanPlayer?.gold || 0) < upgradeTarget.room.bedUpgradeCost || ((upgradeTarget.room.bedSoulCost || 0) > 0 && (humanPlayer?.souls || 0) < (upgradeTarget.room.bedSoulCost || 0))"
                 @click="upgradeBed">
-                <template v-if="(upgradeTarget.room.bedSoulCost || 0) > 0">
-                  {{ t('ui.upgradeBedWithSouls', { cost: upgradeTarget.room.bedUpgradeCost, souls: upgradeTarget.room.bedSoulCost, income: upgradeTarget.room.bedIncome * 2 }) }}
-                </template>
-                <template v-else>
-                  {{ t('ui.upgradeBed', { cost: upgradeTarget.room.bedUpgradeCost, income: upgradeTarget.room.bedIncome * 2 }) }}
-                </template>
+                <GameIcons name="gold" :size="18" />
+                <span>Nâng cấp ({{ upgradeTarget.room.bedUpgradeCost }}g)</span>
+                <span v-if="(upgradeTarget.room.bedSoulCost || 0) > 0" class="flex items-center gap-1 ml-1">
+                  + <GameIcons name="soul" :size="14" /> {{ upgradeTarget.room.bedSoulCost }}
+                </span>
               </button>
-              <button class="rounded-xl border border-neutral-600 py-2 text-sm text-neutral-300 hover:bg-white/10 transition" @click="closeUpgradeModal">
+              <button class="game-btn rounded-xl border border-neutral-600 py-2 text-sm text-neutral-300 hover:bg-white/10 transition" @click="closeUpgradeModal">
                 {{ t('ui.cancel') }}
               </button>
             </div>
@@ -4703,42 +5540,161 @@ onUnmounted(() => {
           
           <!-- Building Upgrade/Sell -->
           <template v-else-if="upgradeTarget.type === 'building' && upgradeTarget.building">
-            <h2 class="mb-3 text-center font-bold text-lg" :class="{
-              'text-blue-400': upgradeTarget.building.type === 'turret',
-              'text-green-400': upgradeTarget.building.type === 'atm',
-              'text-violet-400': upgradeTarget.building.type === 'soul_collector',
-              'text-indigo-400': upgradeTarget.building.type === 'vanguard',
-              'text-orange-400': upgradeTarget.building.type === 'smg'
-            }">
-              {{ upgradeTarget.building.type === 'turret' ? t('ui.turretTitle') : upgradeTarget.building.type === 'atm' ? t('ui.atmTitle') : upgradeTarget.building.type === 'vanguard' ? t('ui.vanguardTitle') : upgradeTarget.building.type === 'smg' ? t('ui.smgTitle') : t('ui.soulCollectorTitle') }}
-            </h2>
-            <div class="text-center mb-4">
-              <div class="text-2xl font-bold">{{ t('terms.level') }} {{ upgradeTarget.building.level }}/10</div>
-              <div class="text-sm text-neutral-400">
-                <span v-if="upgradeTarget.building.damage > 0">DMG: {{ Math.floor(upgradeTarget.building.damage) }}</span>
-                <span v-if="upgradeTarget.building.range > 0" class="ml-2">Range: {{ Math.floor(upgradeTarget.building.range) }}</span>
-                <span v-if="upgradeTarget.building.goldRate" class="text-yellow-400">💰 {{ upgradeTarget.building.goldRate }}/s</span>
-                <span v-if="upgradeTarget.building.soulRate" class="text-violet-400">👻 {{ upgradeTarget.building.soulRate }}/s</span>
-                <span v-if="upgradeTarget.building.type === 'vanguard'" class="text-indigo-400">⚔️ {{ 1 + Math.floor(upgradeTarget.building.level / 2) }} units</span>
-              </div>
-              <div class="text-xs text-red-400">HP: {{ Math.floor(upgradeTarget.building.hp) }}/{{ upgradeTarget.building.maxHp }}</div>
+            <div class="flex items-center justify-center gap-3 mb-4">
+              <GameIcons 
+                :name="upgradeTarget.building.type === 'turret' ? 'turret' : upgradeTarget.building.type === 'atm' ? 'gold' : upgradeTarget.building.type === 'vanguard' ? 'sword' : upgradeTarget.building.type === 'smg' ? 'zap' : 'soul'" 
+                :size="32" 
+              />
+              <h2 class="font-game text-xl" :class="{
+                'text-blue-400': upgradeTarget.building.type === 'turret',
+                'text-green-400': upgradeTarget.building.type === 'atm',
+                'text-violet-400': upgradeTarget.building.type === 'soul_collector',
+                'text-indigo-400': upgradeTarget.building.type === 'vanguard',
+                'text-orange-400': upgradeTarget.building.type === 'smg'
+              }">
+                {{ upgradeTarget.building.type === 'turret' ? t('ui.turretTitle') : upgradeTarget.building.type === 'atm' ? t('ui.atmTitle') : upgradeTarget.building.type === 'vanguard' ? t('ui.vanguardTitle') : upgradeTarget.building.type === 'smg' ? t('ui.smgTitle') : t('ui.soulCollectorTitle') }}
+              </h2>
             </div>
+            
+            <!-- Current Stats -->
+            <div class="bg-neutral-800/50 rounded-xl p-4 mb-4 border" :class="{
+              'border-blue-500/20': upgradeTarget.building.type === 'turret',
+              'border-green-500/20': upgradeTarget.building.type === 'atm',
+              'border-violet-500/20': upgradeTarget.building.type === 'soul_collector',
+              'border-indigo-500/20': upgradeTarget.building.type === 'vanguard',
+              'border-orange-500/20': upgradeTarget.building.type === 'smg'
+            }">
+              <div class="flex items-center justify-between mb-3">
+                <span class="text-neutral-400 text-sm">{{ t('terms.level') }}</span>
+                <span class="font-game text-2xl" :class="{
+                  'text-blue-400': upgradeTarget.building.type === 'turret',
+                  'text-green-400': upgradeTarget.building.type === 'atm',
+                  'text-violet-400': upgradeTarget.building.type === 'soul_collector',
+                  'text-indigo-400': upgradeTarget.building.type === 'vanguard',
+                  'text-orange-400': upgradeTarget.building.type === 'smg'
+                }">{{ upgradeTarget.building.level }}/10</span>
+              </div>
+              
+              <!-- Stats based on building type -->
+              <div class="space-y-2 mb-3">
+                <div v-if="upgradeTarget.building.damage > 0" class="flex items-center justify-between">
+                  <span class="text-neutral-400 text-sm flex items-center gap-1.5">
+                    <GameIcons name="sword" :size="14" /> Sát thương
+                  </span>
+                  <span class="font-game text-lg text-red-300">{{ Math.floor(upgradeTarget.building.damage) }}</span>
+                </div>
+                <div v-if="upgradeTarget.building.range > 0" class="flex items-center justify-between">
+                  <span class="text-neutral-400 text-sm flex items-center gap-1.5">
+                    <GameIcons name="target" :size="14" /> Tầm bắn
+                  </span>
+                  <span class="font-game text-lg text-cyan-300">{{ Math.floor(upgradeTarget.building.range) }}</span>
+                </div>
+                <div v-if="upgradeTarget.building.goldRate" class="flex items-center justify-between">
+                  <span class="text-neutral-400 text-sm flex items-center gap-1.5">
+                    <GameIcons name="gold" :size="14" /> Thu nhập
+                  </span>
+                  <span class="font-game text-lg text-amber-300">{{ upgradeTarget.building.goldRate }}/giây</span>
+                </div>
+                <div v-if="upgradeTarget.building.soulRate" class="flex items-center justify-between">
+                  <span class="text-neutral-400 text-sm flex items-center gap-1.5">
+                    <GameIcons name="soul" :size="14" /> Linh hồn
+                  </span>
+                  <span class="font-game text-lg text-violet-300">{{ upgradeTarget.building.soulRate }}/giây</span>
+                </div>
+                <div v-if="upgradeTarget.building.type === 'vanguard'" class="flex items-center justify-between">
+                  <span class="text-neutral-400 text-sm flex items-center gap-1.5">
+                    <GameIcons name="users" :size="14" /> Số lính
+                  </span>
+                  <span class="font-game text-lg text-indigo-300">{{ 1 + Math.floor(upgradeTarget.building.level / 2) }}</span>
+                </div>
+              </div>
+              
+              <!-- HP Bar -->
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-neutral-400 text-sm flex items-center gap-1.5">
+                  <GameIcons name="health" :size="14" /> HP
+                </span>
+                <span class="font-game text-sm" :class="upgradeTarget.building.hp / upgradeTarget.building.maxHp > 0.5 ? 'text-green-300' : upgradeTarget.building.hp / upgradeTarget.building.maxHp > 0.25 ? 'text-yellow-300' : 'text-red-300'">{{ Math.floor(upgradeTarget.building.hp) }}/{{ upgradeTarget.building.maxHp }}</span>
+              </div>
+              <div class="w-full h-2 bg-neutral-700 rounded-full overflow-hidden">
+                <div 
+                  class="h-full transition-all duration-300"
+                  :class="upgradeTarget.building.hp / upgradeTarget.building.maxHp > 0.5 ? 'bg-green-500' : upgradeTarget.building.hp / upgradeTarget.building.maxHp > 0.25 ? 'bg-yellow-500' : 'bg-red-500'"
+                  :style="{ width: (upgradeTarget.building.hp / upgradeTarget.building.maxHp * 100) + '%' }"
+                ></div>
+              </div>
+            </div>
+            
+            <!-- Upgrade Preview -->
+            <div v-if="upgradeTarget.building.level < 10" class="bg-gradient-to-r rounded-xl p-4 mb-4 border" :class="{
+              'from-blue-900/30 to-blue-800/20 border-blue-500/30': upgradeTarget.building.type === 'turret',
+              'from-green-900/30 to-green-800/20 border-green-500/30': upgradeTarget.building.type === 'atm',
+              'from-violet-900/30 to-violet-800/20 border-violet-500/30': upgradeTarget.building.type === 'soul_collector',
+              'from-indigo-900/30 to-indigo-800/20 border-indigo-500/30': upgradeTarget.building.type === 'vanguard',
+              'from-orange-900/30 to-orange-800/20 border-orange-500/30': upgradeTarget.building.type === 'smg'
+            }">
+              <div class="text-xs mb-2 font-game" :class="{
+                'text-blue-400/80': upgradeTarget.building.type === 'turret',
+                'text-green-400/80': upgradeTarget.building.type === 'atm',
+                'text-violet-400/80': upgradeTarget.building.type === 'soul_collector',
+                'text-indigo-400/80': upgradeTarget.building.type === 'vanguard',
+                'text-orange-400/80': upgradeTarget.building.type === 'smg'
+              }">SAU KHI NÂNG CẤP</div>
+              <div class="space-y-1">
+                <div v-if="upgradeTarget.building.damage > 0" class="flex items-center justify-between">
+                  <span class="text-neutral-300 text-sm">Sát thương</span>
+                  <div class="flex items-center gap-2">
+                    <span class="text-neutral-500 line-through text-sm">{{ Math.floor(upgradeTarget.building.damage) }}</span>
+                    <span class="text-green-400">→</span>
+                    <span class="font-game text-green-400">{{ Math.floor(upgradeTarget.building.damage * 1.2) }}</span>
+                  </div>
+                </div>
+                <div v-if="upgradeTarget.building.goldRate" class="flex items-center justify-between">
+                  <span class="text-neutral-300 text-sm">Thu nhập</span>
+                  <div class="flex items-center gap-2">
+                    <span class="text-neutral-500 line-through text-sm">{{ upgradeTarget.building.goldRate }}</span>
+                    <span class="text-green-400">→</span>
+                    <span class="font-game text-green-400">{{ Math.floor(upgradeTarget.building.goldRate * 1.3) }}/s</span>
+                  </div>
+                </div>
+                <div v-if="upgradeTarget.building.soulRate" class="flex items-center justify-between">
+                  <span class="text-neutral-300 text-sm">Linh hồn</span>
+                  <div class="flex items-center gap-2">
+                    <span class="text-neutral-500 line-through text-sm">{{ upgradeTarget.building.soulRate }}</span>
+                    <span class="text-green-400">→</span>
+                    <span class="font-game text-green-400">{{ Math.floor(upgradeTarget.building.soulRate * 1.3) }}/s</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
             <div class="flex flex-col gap-2">
               <button 
                 v-if="upgradeTarget.building.level < 10"
-                class="rounded-xl bg-blue-600 hover:bg-blue-500 py-3 font-bold text-white transition"
-                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < upgradeTarget.building.upgradeCost || (upgradeTarget.building.level >= 4 && (humanPlayer?.souls || 0) < GAME_CONSTANTS.SOUL_UPGRADE_COST * (upgradeTarget.building.level - 3)) }"
+                class="game-btn rounded-xl py-3 font-game text-white transition-all shadow-lg flex items-center justify-center gap-2"
+                :class="[
+                  (humanPlayer?.gold || 0) >= upgradeTarget.building.upgradeCost && (upgradeTarget.building.level < 4 || (humanPlayer?.souls || 0) >= GAME_CONSTANTS.SOUL_UPGRADE_COST * (upgradeTarget.building.level - 3))
+                    ? 'bg-gradient-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 ring-2 ring-green-400/50'
+                    : 'bg-gradient-to-r from-neutral-600 to-neutral-500 opacity-50 cursor-not-allowed'
+                ]"
                 :disabled="(humanPlayer?.gold || 0) < upgradeTarget.building.upgradeCost || (upgradeTarget.building.level >= 4 && (humanPlayer?.souls || 0) < GAME_CONSTANTS.SOUL_UPGRADE_COST * (upgradeTarget.building.level - 3))"
                 @click="upgradeBuilding">
-                {{ t('ui.upgradeBuilding', { cost: upgradeTarget.building.upgradeCost }) }}<span v-if="upgradeTarget.building.level >= 4">{{ t('ui.upgradeBuildingSouls', { souls: GAME_CONSTANTS.SOUL_UPGRADE_COST * (upgradeTarget.building.level - 3) }) }}</span><span v-else>)</span>
+                <GameIcons name="gold" :size="18" />
+                <span>Nâng cấp ({{ upgradeTarget.building.upgradeCost }}g)</span>
+                <span v-if="upgradeTarget.building.level >= 4" class="flex items-center gap-1 ml-1">
+                  + <GameIcons name="soul" :size="14" /> {{ GAME_CONSTANTS.SOUL_UPGRADE_COST * (upgradeTarget.building.level - 3) }}
+                </span>
               </button>
-              <div v-else class="text-center text-green-400 py-2">{{ t('ui.maxLevel') }}</div>
+              <div v-else class="bg-green-900/30 rounded-xl p-3 border border-green-500/30">
+                <div class="text-center text-green-400 font-game">{{ t('ui.maxLevel') }}</div>
+              </div>
               <button 
-                class="rounded-xl bg-red-600/80 hover:bg-red-500 py-2 font-medium text-white transition"
+                class="game-btn rounded-xl bg-gradient-to-r from-red-600/80 to-red-500/80 hover:from-red-500 hover:to-red-400 py-2 font-game text-white transition-all flex items-center justify-center gap-2"
                 @click="sellBuilding">
-                {{ t('ui.sellBuilding', { refund: Math.floor(upgradeTarget.building.upgradeCost * 0.4) }) }}
+                <GameIcons name="trash" :size="16" />
+                <span>Bán (hoàn {{ Math.floor(upgradeTarget.building.upgradeCost * 0.4) }}g)</span>
               </button>
-              <button class="rounded-xl border border-neutral-600 py-2 text-sm text-neutral-300 hover:bg-white/10 transition" @click="closeUpgradeModal">
+              <button class="game-btn rounded-xl border border-neutral-600 py-2 text-sm text-neutral-300 hover:bg-white/10 transition" @click="closeUpgradeModal">
                 {{ t('ui.cancel') }}
               </button>
             </div>
@@ -4747,93 +5703,214 @@ onUnmounted(() => {
       </div>
     </Transition>
 
-    <!-- Build Popup -->
+    <!-- Build Popup with Tabs -->
     <Transition name="popup">
       <div v-if="showBuildPopup" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" @click.self="showBuildPopup = false">
-        <div class="relative w-full max-w-lg rounded-2xl border border-white/20 bg-neutral-900/95 backdrop-blur-md p-5 shadow-2xl max-h-[80vh] overflow-y-auto">
-          <button class="absolute right-3 top-3 text-xl text-neutral-500 hover:text-white" @click="showBuildPopup = false">✕</button>
-          <h2 class="mb-3 text-center font-bold text-lg text-amber-400">{{ t('ui.buildDefense') }}</h2>
-          
-          <!-- Resources Display -->
-          <div class="flex justify-center gap-6 mb-4 pb-3 border-b border-white/10">
-            <span class="text-amber-400 font-semibold">💰 {{ humanPlayer?.gold || 0 }}</span>
-            <span class="text-purple-400 font-semibold">👻 {{ humanPlayer?.souls || 0 }}</span>
+        <div class="game-panel relative w-full max-w-xl rounded-2xl border border-white/20 bg-neutral-900/95 backdrop-blur-md shadow-2xl max-h-[85vh] overflow-hidden flex flex-col">
+          <!-- Header -->
+          <div class="p-4 border-b border-white/10">
+            <button class="absolute right-3 top-3 text-xl text-neutral-500 hover:text-white z-10" @click="showBuildPopup = false">✕</button>
+            <h2 class="text-center font-game text-lg text-amber-400">{{ t('ui.buildDefense') }}</h2>
+            
+            <!-- Resources Display -->
+            <div class="flex justify-center gap-6 mt-3">
+              <span class="text-amber-400 font-game flex items-center gap-1.5 bg-amber-500/10 px-3 py-1 rounded-lg"><GameIcons name="gold" :size="18" /> {{ humanPlayer?.gold || 0 }}</span>
+              <span class="text-purple-400 font-game flex items-center gap-1.5 bg-purple-500/10 px-3 py-1 rounded-lg"><GameIcons name="soul" :size="18" /> {{ humanPlayer?.souls || 0 }}</span>
+            </div>
           </div>
           
-          <!-- Phòng thủ -->
-          <div class="mb-4">
-            <h3 class="text-sm font-bold text-white/80 mb-2 flex items-center gap-2">
+          <!-- Tabs -->
+          <div class="flex border-b border-white/10">
+            <button 
+              class="flex-1 py-3 px-4 font-game text-sm transition-all flex items-center justify-center gap-2"
+              :class="buildTab === 'defense' ? 'text-blue-400 bg-blue-500/10 border-b-2 border-blue-400' : 'text-neutral-400 hover:text-white hover:bg-white/5'"
+              @click="buildTab = 'defense'"
+            >
               <span>🛡️</span> Phòng thủ
-            </h3>
-            <div class="grid grid-cols-2 gap-2">
+            </button>
+            <button 
+              class="flex-1 py-3 px-4 font-game text-sm transition-all flex items-center justify-center gap-2"
+              :class="buildTab === 'economy' ? 'text-amber-400 bg-amber-500/10 border-b-2 border-amber-400' : 'text-neutral-400 hover:text-white hover:bg-white/5'"
+              @click="buildTab = 'economy'"
+            >
+              <GameIcons name="gold" :size="16" /> Kinh tế
+            </button>
+          </div>
+          
+          <!-- Content -->
+          <div class="flex-1 overflow-y-auto p-4">
+            <!-- Tab: Phòng thủ -->
+            <div v-if="buildTab === 'defense'" class="space-y-3">
               <!-- Turret -->
-              <button
-                class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-amber-500/50 hover:bg-white/10"
-                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.turret }"
-                :disabled="(humanPlayer?.gold || 0) < buildingCosts.turret"
-                @click="buildDefense('turret')">
-                <div class="text-2xl mb-1">🔫</div>
-                <div class="font-bold text-sm">{{ t('ui.turret') }}</div>
-                <div class="text-xs text-amber-400">{{ buildingCosts.turret }}💰</div>
-                
-              </button>
+              <div 
+                class="group rounded-xl border bg-white/5 p-4 transition-all cursor-pointer hover:bg-white/10"
+                :class="(humanPlayer?.gold || 0) >= buildingCosts.turret ? 'border-white/10 hover:border-blue-500/50' : 'border-red-500/30 opacity-60 cursor-not-allowed'"
+                @click="(humanPlayer?.gold || 0) >= buildingCosts.turret && buildDefense('turret')"
+              >
+                <div class="flex items-start gap-4">
+                  <div class="w-14 h-14 rounded-xl bg-blue-500/20 flex items-center justify-center shrink-0 group-hover:bg-blue-500/30 transition">
+                    <GameIcons name="turret" :size="36" />
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center justify-between mb-1">
+                      <span class="font-game text-white">{{ t('ui.turret') }}</span>
+                      <span class="text-amber-400 font-game flex items-center gap-1 text-sm">
+                        {{ buildingCosts.turret }} <GameIcons name="gold" :size="14" />
+                      </span>
+                    </div>
+                    <p class="text-xs text-neutral-400 leading-relaxed">Trụ pháo tự động nhắm và bắn quái vật trong tầm. Sát thương cao, tốc độ bắn trung bình. Phù hợp phòng thủ tầm xa.</p>
+                    <div class="flex gap-3 mt-2 text-xs">
+                      <span class="text-red-400 flex items-center gap-1"><GameIcons name="sword" :size="12" /> {{ GAME_CONSTANTS.BUILDINGS.turret.damage }}</span>
+                      <span class="text-blue-400 flex items-center gap-1"><GameIcons name="target" :size="12" /> {{ GAME_CONSTANTS.BUILDINGS.turret.range }}px</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <!-- SMG -->
-              <button
-                class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-orange-500/50 hover:bg-white/10"
-                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.smg }"
-                :disabled="(humanPlayer?.gold || 0) < buildingCosts.smg"
-                @click="buildDefense('smg')">
-                <div class="text-2xl mb-1">🔥</div>
-                <div class="font-bold text-sm">{{ t('ui.smg') }}</div>
-                <div class="text-xs text-amber-400">{{ buildingCosts.smg }}💰</div>
-                
-              </button>
+              <div 
+                class="group rounded-xl border bg-white/5 p-4 transition-all cursor-pointer hover:bg-white/10"
+                :class="(humanPlayer?.gold || 0) >= buildingCosts.smg ? 'border-white/10 hover:border-orange-500/50' : 'border-red-500/30 opacity-60 cursor-not-allowed'"
+                @click="(humanPlayer?.gold || 0) >= buildingCosts.smg && buildDefense('smg')"
+              >
+                <div class="flex items-start gap-4">
+                  <div class="w-14 h-14 rounded-xl bg-orange-500/20 flex items-center justify-center shrink-0 group-hover:bg-orange-500/30 transition">
+                    <GameIcons name="smg" :size="36" />
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center justify-between mb-1">
+                      <span class="font-game text-white">{{ t('ui.smg') }}</span>
+                      <span class="text-amber-400 font-game flex items-center gap-1 text-sm">
+                        {{ buildingCosts.smg }} <GameIcons name="gold" :size="14" />
+                      </span>
+                    </div>
+                    <p class="text-xs text-neutral-400 leading-relaxed">Súng máy bắn liên thanh 10 viên mỗi 7 giây. Sát thương thấp nhưng tần suất bắn nhanh. Hiệu quả với quái di chuyển.</p>
+                    <div class="flex gap-3 mt-2 text-xs">
+                      <span class="text-red-400 flex items-center gap-1"><GameIcons name="sword" :size="12" /> {{ GAME_CONSTANTS.BUILDINGS.smg.damage }}×10</span>
+                      <span class="text-blue-400 flex items-center gap-1"><GameIcons name="target" :size="12" /> {{ GAME_CONSTANTS.BUILDINGS.smg.range }}px</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <!-- Vanguard -->
-              <button
-                class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-indigo-500/50 hover:bg-white/10"
-                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.vanguard }"
-                :disabled="(humanPlayer?.gold || 0) < buildingCosts.vanguard"
-                @click="buildDefense('vanguard')">
-                <div class="text-2xl mb-1">⚔️</div>
-                <div class="font-bold text-sm">{{ t('ui.vanguard') }}</div>
-                <div class="text-xs text-amber-400">{{ buildingCosts.vanguard }}💰</div>
-                
-              </button>
+              <div 
+                class="group rounded-xl border bg-white/5 p-4 transition-all cursor-pointer hover:bg-white/10"
+                :class="(humanPlayer?.gold || 0) >= buildingCosts.vanguard ? 'border-white/10 hover:border-indigo-500/50' : 'border-red-500/30 opacity-60 cursor-not-allowed'"
+                @click="(humanPlayer?.gold || 0) >= buildingCosts.vanguard && buildDefense('vanguard')"
+              >
+                <div class="flex items-start gap-4">
+                  <div class="w-14 h-14 rounded-xl bg-indigo-500/20 flex items-center justify-center shrink-0 group-hover:bg-indigo-500/30 transition">
+                    <GameIcons name="vanguard" :size="36" />
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center justify-between mb-1">
+                      <span class="font-game text-white">{{ t('ui.vanguard') }}</span>
+                      <span class="text-amber-400 font-game flex items-center gap-1 text-sm">
+                        {{ buildingCosts.vanguard }} <GameIcons name="gold" :size="14" />
+                      </span>
+                    </div>
+                    <p class="text-xs text-neutral-400 leading-relaxed">Triệu hồi lính tiên phong tuần tra quanh phòng. Sát thương 20, tự động tấn công quái và thu hút sự chú ý.</p>
+                    <div class="flex gap-3 mt-2 text-xs">
+                      <span class="text-red-400 flex items-center gap-1"><GameIcons name="sword" :size="12" /> 20</span>
+                      <span class="text-green-400 flex items-center gap-1"><GameIcons name="health" :size="12" /> {{ GAME_CONSTANTS.BUILDINGS.vanguard.hp }} HP</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
-          
-          <!-- Kinh tế -->
-          <div class="mb-3">
-            <h3 class="text-sm font-bold text-white/80 mb-2 flex items-center gap-2">
-              <span>💰</span> Kinh tế
-            </h3>
-            <div class="grid grid-cols-2 gap-2">
+
+            <!-- Tab: Kinh tế -->
+            <div v-if="buildTab === 'economy'" class="space-y-3">
               <!-- ATM - Mua bằng LINH HỒN -->
-              <button
-                class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-purple-500/50 hover:bg-white/10"
-                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.souls || 0) < buildingCosts.atm }"
-                :disabled="(humanPlayer?.souls || 0) < buildingCosts.atm"
-                @click="buildDefense('atm')">
-                <div class="text-2xl mb-1">🏧</div>
-                <div class="font-bold text-sm">{{ t('ui.atm') }}</div>
-                <div class="text-xs text-purple-400">{{ buildingCosts.atm }}👻</div>
-                
-              </button>
+              <div 
+                class="group rounded-xl border bg-white/5 p-4 transition-all cursor-pointer hover:bg-white/10"
+                :class="(humanPlayer?.souls || 0) >= buildingCosts.atm ? 'border-white/10 hover:border-green-500/50' : 'border-red-500/30 opacity-60 cursor-not-allowed'"
+                @click="(humanPlayer?.souls || 0) >= buildingCosts.atm && buildDefense('atm')"
+              >
+                <div class="flex items-start gap-4">
+                  <div class="w-14 h-14 rounded-xl bg-green-500/20 flex items-center justify-center shrink-0 group-hover:bg-green-500/30 transition">
+                    <GameIcons name="atm" :size="36" />
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center justify-between mb-1">
+                      <span class="font-game text-white">{{ t('ui.atm') }}</span>
+                      <span class="text-purple-400 font-game flex items-center gap-1 text-sm">
+                        {{ buildingCosts.atm }} <GameIcons name="soul" :size="14" />
+                      </span>
+                    </div>
+                    <p class="text-xs text-neutral-400 leading-relaxed">Máy ATM tự động sinh vàng theo thời gian. Nguồn thu nhập thụ động ổn định. Mua bằng Linh hồn.</p>
+                    <div class="flex gap-3 mt-2 text-xs">
+                      <span class="text-amber-400 flex items-center gap-1"><GameIcons name="gold" :size="12" /> +{{ GAME_CONSTANTS.BUILDINGS.atm.goldRate }}/s</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <!-- Soul Collector -->
-              <button
-                class="rounded-xl border border-white/10 bg-white/5 p-3 text-center transition hover:border-amber-500/50 hover:bg-white/10"
-                :class="{ 'opacity-50 cursor-not-allowed': (humanPlayer?.gold || 0) < buildingCosts.soulCollector }"
-                :disabled="(humanPlayer?.gold || 0) < buildingCosts.soulCollector"
-                @click="buildDefense('soul_collector')">
-                <div class="text-2xl mb-1">👻</div>
-                <div class="font-bold text-sm">{{ t('ui.soul') }}</div>
-                <div class="text-xs text-amber-400">{{ buildingCosts.soulCollector }}💰</div>
-                
-              </button>
+              <div 
+                class="group rounded-xl border bg-white/5 p-4 transition-all cursor-pointer hover:bg-white/10"
+                :class="(humanPlayer?.gold || 0) >= buildingCosts.soulCollector ? 'border-white/10 hover:border-purple-500/50' : 'border-red-500/30 opacity-60 cursor-not-allowed'"
+                @click="(humanPlayer?.gold || 0) >= buildingCosts.soulCollector && buildDefense('soul_collector')"
+              >
+                <div class="flex items-start gap-4">
+                  <div class="w-14 h-14 rounded-xl bg-purple-500/20 flex items-center justify-center shrink-0 group-hover:bg-purple-500/30 transition">
+                    <GameIcons name="collector" :size="36" />
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center justify-between mb-1">
+                      <span class="font-game text-white">{{ t('ui.soul') }}</span>
+                      <span class="text-amber-400 font-game flex items-center gap-1 text-sm">
+                        {{ buildingCosts.soulCollector }} <GameIcons name="gold" :size="14" />
+                      </span>
+                    </div>
+                    <p class="text-xs text-neutral-400 leading-relaxed">Thu thập Linh hồn từ môi trường xung quanh. Linh hồn dùng để mua ATM và nâng cấp công trình cấp cao.</p>
+                    <div class="flex gap-3 mt-2 text-xs">
+                      <span class="text-purple-400 flex items-center gap-1"><GameIcons name="soul" :size="12" /> +{{ GAME_CONSTANTS.BUILDINGS.soul_collector.soulRate }}/s</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
           
-          <p class="text-xs text-neutral-500 mt-3 text-center">Giá niêm yết, không trả giá!</p>
+          <!-- Footer -->
+          <div class="p-3 border-t border-white/10 bg-black/30">
+            <p class="text-md text-neutral-500 text-center font-game-body">Giá niêm yết, không trả giá!</p>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- Pause/Exit Confirmation Modal -->
+    <Transition name="popup">
+      <div v-if="showPauseModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+        <div class="game-panel w-full max-w-xs rounded-2xl border-2 border-amber-500/50 bg-neutral-900/95 p-6 text-center shadow-2xl">
+          <div class="flex justify-center mb-4">
+            <div class="w-16 h-16 rounded-full bg-amber-500/20 flex items-center justify-center">
+              <span class="text-4xl">⏸️</span>
+            </div>
+          </div>
+          <h2 class="text-2xl font-game text-amber-400 mb-2">
+            {{ t('ui.paused') || 'TẠM DỪNG' }}
+          </h2>
+          <p class="text-neutral-400 text-sm font-game-body mb-6">
+            {{ t('ui.exitConfirm') || 'Bạn có chắc muốn thoát game?' }}
+          </p>
+          <div class="flex flex-col gap-3">
+            <button 
+              class="game-btn rounded-xl bg-linear-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 py-2.5 font-game text-white transition-all"
+              @click="resumeGame"
+            >
+              {{ t('ui.resume') || 'TIẾP TỤC' }}
+            </button>
+            <button 
+              class="game-btn rounded-xl bg-linear-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-400 py-2 font-game text-white transition-all"
+              @click="confirmExit"
+            >
+              {{ t('ui.exitGame') || 'THOÁT GAME' }}
+            </button>
+          </div>
         </div>
       </div>
     </Transition>
@@ -4841,20 +5918,23 @@ onUnmounted(() => {
     <!-- Game Over -->
     <Transition name="popup">
       <div v-if="gameOver" class="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm p-4">
-        <div class="w-full max-w-xs rounded-2xl border-2 p-6 text-center shadow-2xl"
+        <div class="game-panel w-full max-w-xs rounded-2xl border-2 p-6 text-center shadow-2xl"
           :class="victory ? 'border-amber-500 bg-linear-to-b from-amber-950/90 to-neutral-900/90' : 'border-red-500 bg-linear-to-b from-red-950/90 to-neutral-900/90'">
-          <div class="text-6xl mb-3">{{ victory ? '🏆' : '💀' }}</div>
-          <h2 class="text-3xl font-bold" :class="victory ? 'text-amber-400' : 'text-red-400'">
+          <div class="flex justify-center mb-3">
+            <div v-if="victory" class="text-6xl">🏆</div>
+            <GameIcons v-else name="skull" :size="64" />
+          </div>
+          <h2 class="text-3xl font-game" :class="victory ? 'glow-gold' : 'glow-red'">
             {{ victory ? t('ui.victory') : t('ui.defeat') }}
           </h2>
-          <p class="mt-2 text-neutral-400 text-sm">
+          <p class="mt-2 text-neutral-400 text-sm font-game-body">
             {{ victory ? t('ui.monsterDefeated') : t('ui.youWereKilled') }}
           </p>
           <div class="mt-6 flex flex-col gap-2">
-            <button class="rounded-xl bg-linear-to-r from-amber-600 to-amber-500 py-2.5 font-bold text-white" @click="restartGame">
+            <button class="game-btn rounded-xl bg-linear-to-r from-amber-600 to-amber-500 py-2.5 font-game text-white" @click="restartGame">
               {{ t('ui.playAgain') }}
             </button>
-            <button class="rounded-xl border border-neutral-600 py-2 text-sm text-neutral-300" @click="backToHome">
+            <button class="game-btn rounded-xl border border-neutral-600 py-2 text-sm font-game text-neutral-300" @click="confirmExit">
               {{ t('ui.home') }}
             </button>
           </div>

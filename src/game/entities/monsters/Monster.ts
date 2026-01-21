@@ -151,18 +151,18 @@ export interface MonsterTypeConfig extends MonsterConfig {
 // DEFAULT MONSTER CONFIG
 // =============================================================================
 export const DEFAULT_MONSTER_CONFIG: MonsterConfig = {
-  maxHp: 800,
+  maxHp: 1000,
   baseDamage: 10,
   speed: 120,
   attackRange: 55,
   attackCooldown: 1.0,
-  damageScale: 1.4,
+  damageScale: 1.35,
   hpScale: 1.3,
   healThreshold: 0.2,
-  healRate: 0.2,
+  healRate: 0.25,
   retreatSpeedBonus: 1.5,
   targetTimeout: 30,
   aggressiveness: 0.7,
   baseLevelTime: 30,
-  levelTimeIncrement: 10,
+  levelTimeIncrement: 5,
 }

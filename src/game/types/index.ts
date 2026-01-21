@@ -32,6 +32,13 @@ export interface GridCell {
 // =============================================================================
 export type DoorSide = 'top' | 'bottom' | 'left' | 'right'
 
+// Build spot with rebuild capability
+export interface BuildSpot {
+  x: number
+  y: number
+  reBuildable: boolean  // Can rebuild a new building here after destruction? Default: false
+}
+
 export interface Room {
   id: number
   gridX: number
@@ -47,12 +54,13 @@ export interface Room {
   doorRepairCooldown: number
   doorIsRepairing: boolean
   doorRepairTimer: number
+  doorReBuildable: boolean  // Can rebuild door after destruction? Default: false
   ownerId: number | null
   bedPosition: Vector2
   bedLevel: number
   bedUpgradeCost: number
   bedIncome: number
-  buildSpots: Vector2[]
+  buildSpots: BuildSpot[]  // Build spots with rebuild capability
   doorPosition: Vector2
   doorGridX: number
   doorGridY: number
