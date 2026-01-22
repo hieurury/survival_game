@@ -280,15 +280,15 @@ export function createPhantomKnight(
 export const DEFAULT_PHANTOM_KNIGHT_CONFIG: PhantomKnightConfig = {
   archetype: 'ranged',
   name: 'Vong hồn kỵ sỹ',
-  maxHp: 1150,
-  baseDamage: 20,
+  maxHp: 700,
+  baseDamage: 15,
   speed: 130,
   attackRange: 55, // Melee range
   attackCooldown: 0.9, // Faster attack speed
   hpScale: 1.2,
-  damageScale: 1.4,
-  healThreshold: 0.3,
-  healRate: 0.3,
+  damageScale: 1.3,
+  healThreshold: 0.2,
+  healRate: 0.15,
   retreatSpeedBonus: 1.5,
   targetTimeout: 30,
   aggressiveness: 0.8,
@@ -296,6 +296,6 @@ export const DEFAULT_PHANTOM_KNIGHT_CONFIG: PhantomKnightConfig = {
   levelTimeIncrement: 12,
   size: 1.1,
   color: '#6366f1', // Indigo/purple color for phantom
-  passiveRangedRange: 300, // Range when passive activates
-  passiveThreshold: 0.6 // Below 50% HP
+  passiveRangedRange: 250, // Range when passive activates
+  passiveThreshold: 0.5 // Below 50% HP
 }
